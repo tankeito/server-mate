@@ -1,4 +1,4 @@
-# Server-Mate 1.1.0 example configuration
+# Server-Mate 1.1.1 example configuration
 
 agent:
   host_id: web-01
@@ -18,16 +18,16 @@ system_metrics:
   collect_network_io: true
 
 sites:
-  - domain: agent.btc354.com
-    site_host: agent.btc354.com
+  - domain: site-a.example.com
+    site_host: site-a.example.com
     enabled: true
-    access_log: /www/wwwlogs/agent.btc354.com.log
-    error_log: /www/server/panel/vhost/nginx/agent.btc354.com.error.log
-  - domain: api.example.com
-    site_host: api.example.com
+    access_log: /path/to/logs/site-a.access.log
+    error_log: /path/to/logs/site-a.error.log
+  - domain: site-b.example.com
+    site_host: site-b.example.com
     enabled: true
-    access_log: /var/log/nginx/api.example.com.access.log
-    error_log: /var/log/nginx/api.example.com.error.log
+    access_log: /path/to/logs/site-b.access.log
+    error_log: /path/to/logs/site-b.error.log
 
 thresholds:
   summary_window_minutes: 10

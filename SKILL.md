@@ -1,12 +1,21 @@
 ---
 name: server-mate
-version: 1.1.0
+version: 1.1.1
 description: Build or extend a lightweight server monitoring and AI operations workflow for Linux hosts running Nginx or Apache. Use when Codex needs to collect psutil metrics, parse access or error logs, design JSON payloads or APIs, add webhook alerts, generate daily or weekly ops reports, answer natural-language monitoring questions, or implement guarded auto-ban and auto-heal behaviors.
+homepage: https://github.com/tankeito/server-mate
+metadata:
+  clawdbot:
+    files:
+      - scripts/*
+      - references/*
+      - config.example.yaml
+      - user-guide.md
+      - _meta.json
 ---
 
 # Server Mate
 
-Version: `1.1.0`
+Version: `1.1.1`
 
 Use this skill to design or implement a two-plane monitoring system:
 - a Python agent on the server that tails logs and samples host metrics
@@ -16,6 +25,8 @@ Use this skill to design or implement a two-plane monitoring system:
 
 - Confirm the environment first: Linux distribution, Nginx or Apache, PHP-FPM layout, log paths, webhook target, and whether automated actions may touch a live host.
 - Keep collection read-only until the user explicitly asks for automation. Add alerting before any auto-ban or auto-heal behavior.
+- Treat `OPENAI_API_KEY` as required only when optional AI analysis is enabled. Treat webhook URLs or tokens in `config.yaml` as secrets and do not commit them.
+- Treat auto-ban and auto-heal as privileged features. They may execute operator-supplied firewall or service restart commands and should stay disabled or `dry_run: true` until reviewed.
 - Use the references progressively instead of loading everything at once:
   - Read [references/architecture.md](references/architecture.md) for overall design, component boundaries, and rollout order.
   - Read [references/data-contracts.md](references/data-contracts.md) before defining JSON payloads, storage schemas, metrics, or natural-language query handlers.
@@ -94,7 +105,7 @@ Use external scheduling for production unless the user explicitly wants an alway
   - Monthly PDF push on day `1` at `01:20`.
 - In multi-site mode, a single scheduled `report_generator.py` run should iterate over every configured site unless the user explicitly passes `--site`.
 
-## Release notes for 1.1.0
+## Release notes for 1.1.1
 
 - Multi-site matrix config using `sites[]` plus global `system_metrics`
 - Host-global metrics stored separately from site-local business rollups

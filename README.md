@@ -6,7 +6,7 @@ English | [中文](README_ZH.md)
 
 > A two-plane monitoring system for Linux hosts running Nginx or Apache.
 
-[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-1.1.1-blue.svg)]()
 [![OpenClaw](https://img.shields.io/badge/OpenClaw-Skill-success.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Platform-CentOS%2FUbuntu%2FDebian-lightgrey.svg)](https://linux.org)
@@ -44,7 +44,7 @@ It splits responsibilities into two planes:
 
 ---
 
-## 🆕 What's New in v1.1.0
+## 🆕 What's New in v1.1.1
 
 ### Multi-Site Monitoring
 
@@ -72,7 +72,7 @@ It splits responsibilities into two planes:
 
 ### Configuration
 
-- **`config.example.yaml`**: Recommended starting point for v1.1.0 with multi-site, system_metrics, and Guarded Automation pre-configured
+- **`config.example.yaml`**: Recommended starting point for v1.1.1 with multi-site, system_metrics, and Guarded Automation pre-configured
 
 ---
 
@@ -96,7 +96,7 @@ python3 -m pip install geoip2
 
 Generate or edit `config.yaml`:
 
-For `1.1.0`, it is recommended to copy [`config.example.yaml`](config.example.yaml) to `config.yaml` first. The example already includes multi-site `sites[]`, global `system_metrics`, webhook channels, and Guarded Automation with `dry_run: true`.
+For `1.1.1`, it is recommended to copy [`config.example.yaml`](config.example.yaml) to `config.yaml` first. The example already includes multi-site `sites[]`, global `system_metrics`, webhook channels, and Guarded Automation with `dry_run: true`.
 
 ```yaml
 agent:

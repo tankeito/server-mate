@@ -10,7 +10,7 @@ Build a lightweight monitoring stack for CentOS servers that can live next to Ba
 
 - Expect CentOS or another RHEL-like host.
 - Expect Nginx, Apache, or both behind Baota/BT panel.
-- Expect site logs under a Baota-managed tree such as `/www/wwwlogs`, but verify the actual `access_log` and `error_log` directives from the vhost config before coding against paths.
+- Do not assume any vendor-specific log tree. Always verify the actual `access_log` and `error_log` directives or set explicit paths in `config.yaml`.
 - Expect PHP-FPM for many PHP sites, but do not assume a single service name. Some environments use `php-fpm`, others use versioned units or init scripts.
 - Expect webhook targets such as WeCom, DingTalk, or ServerChan to be configured outside the core parser.
 

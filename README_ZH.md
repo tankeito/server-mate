@@ -6,7 +6,7 @@
 
 > 专为运行 Nginx 或 Apache 的 Linux 主机设计的双平面监控系统。
 
-[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-1.1.1-blue.svg)]()
 [![OpenClaw](https://img.shields.io/badge/OpenClaw-Skill-success.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Platform-CentOS%2FUbuntu%2FDebian-lightgrey.svg)](https://linux.org)
@@ -44,7 +44,7 @@
 
 ---
 
-## 🆕 v1.1.0 新功能
+## 🆕 v1.1.1 新功能
 
 ### 多站点监控
 
@@ -72,7 +72,7 @@
 
 ### 配置
 
-- **`config.example.yaml`**：v1.1.0 的推荐起点，预配置多站点、system_metrics 和 Guarded Automation
+- **`config.example.yaml`**：v1.1.1 的推荐起点，预配置多站点、system_metrics 和 Guarded Automation
 
 ---
 
@@ -96,7 +96,7 @@ python3 -m pip install geoip2
 
 生成或编辑 `config.yaml`：
 
-从 `1.1.0` 开始，建议优先复制 [`config.example.yaml`](config.example.yaml) 为 `config.yaml`。该模板已经包含多站点 `sites[]`、全局 `system_metrics`、Webhook 渠道以及默认安全开启的 Guarded Automation 配置。
+从 `1.1.1` 开始，建议优先复制 [`config.example.yaml`](config.example.yaml) 为 `config.yaml`。该模板已经包含多站点 `sites[]`、全局 `system_metrics`、Webhook 渠道以及默认安全开启的 Guarded Automation 配置。
 
 ```yaml
 agent:

@@ -68,7 +68,6 @@ PDF_COLORS = {
 }
 
 PDF_FONT_PATHS = [
-    Path(r"E:\ai\Server-Mate\server-mate\assets\NotoSansSC-VF.ttf"),
     Path(__file__).resolve().parents[1] / "assets" / "NotoSansSC-VF.ttf",
 ]
 

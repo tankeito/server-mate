@@ -1,6 +1,6 @@
 # Server-Mate User Guide
 
-Version: `1.1.0`
+Version: `1.1.1`
 
 ## 1. What This Guide Covers
 
@@ -76,26 +76,26 @@ fc-cache -fv
 
 Server-Mate does not hardcode a single BT Panel layout. Always set log paths explicitly in `config.yaml`.
 
-Common examples:
+Typical examples:
 
-- BT Panel / Nginx:
-  - `/www/wwwlogs/example.com.log`
-  - `/www/server/panel/vhost/nginx/example.com.error.log`
-- Ubuntu / Debian Nginx:
-  - `/var/log/nginx/access.log`
-  - `/var/log/nginx/error.log`
+- Nginx:
+  - `/var/log/nginx/site-access.log`
+  - `/var/log/nginx/site-error.log`
 - Apache:
-  - `/var/log/httpd/access_log`
-  - `/var/log/httpd/error_log`
-  - `/var/log/apache2/access.log`
-  - `/var/log/apache2/error.log`
+  - `/var/log/httpd/site-access.log`
+  - `/var/log/httpd/site-error.log`
+  - `/var/log/apache2/site-access.log`
+  - `/var/log/apache2/site-error.log`
+- Custom layout:
+  - `/path/to/logs/site-a.access.log`
+  - `/path/to/logs/site-a.error.log`
 
 ## 3. Configuration Overview
 
 Main config file:
 
 - `config.yaml`
-- Copy [`config.example.yaml`](/E:/ai/Server-Mate/config.example.yaml) to `config.yaml` and then adjust paths, webhooks, and automation switches for your environment.
+- Copy [`config.example.yaml`](config.example.yaml) to `config.yaml` and then adjust paths, webhooks, and automation switches for your environment.
 
 If the file is missing, the agent can generate a default one automatically.
 
@@ -114,10 +114,10 @@ system_metrics:
   collect_network_io: true
 
 sites:
-  - domain: agent.btc354.com
-    site_host: agent.btc354.com
-    access_log: /www/wwwlogs/agent.btc354.com.log
-    error_log: /www/server/panel/vhost/nginx/agent.btc354.com.error.log
+  - domain: site-a.example.com
+    site_host: site-a.example.com
+    access_log: /path/to/logs/site-a.access.log
+    error_log: /path/to/logs/site-a.error.log
   - domain: api.example.com
     site_host: api.example.com
     access_log: /var/log/nginx/api.example.com.access.log
@@ -174,7 +174,7 @@ automation:
     cooldown_seconds: 3600
 ```
 
-For a production-ready template, start from [`config.example.yaml`](/E:/ai/Server-Mate/config.example.yaml).
+For a production-ready template, start from [`config.example.yaml`](config.example.yaml).
 
 ## 4. Parameter Reference
 
@@ -383,8 +383,8 @@ Example:
 ```yaml
 sites:
   - domain: app.example.com
-    access_log: /www/wwwlogs/app.example.com.log
-    error_log: /www/server/panel/vhost/nginx/app.example.com.error.log
+    access_log: /path/to/logs/app.access.log
+    error_log: /path/to/logs/app.error.log
   - domain: api.example.com
     access_log: /var/log/nginx/api.example.com.access.log
     error_log: /var/log/nginx/api.example.com.error.log
@@ -397,7 +397,7 @@ Operational notes:
 - For manual single-site inspection, use `--site`:
 
 ```bash
-python3 scripts/report_generator.py --config config.yaml pdf --range daily --site agent.btc354.com --json
+python3 scripts/report_generator.py --config config.yaml pdf --range daily --site site-a.example.com --json
 ```
 
 ## 6. Guarded Automation Guide

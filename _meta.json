@@ -1,6 +1,6 @@
 {
   "name": "server-mate",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Lightweight server monitoring and AI operations workflow for Linux hosts running Nginx or Apache",
   "author": "tankeito",
   "license": "MIT",
@@ -61,6 +61,38 @@
     "OpenClaw AI analyzer",
     "SQLite for local storage"
   ],
+  "environment_variables": {
+    "required": [],
+    "optional": [
+      "OPENAI_API_KEY"
+    ],
+    "primary": "OPENAI_API_KEY"
+  },
+  "credentials": {
+    "optional_env": [
+      "OPENAI_API_KEY"
+    ],
+    "config_secrets": [
+      "notifications.webhooks.*.url",
+      "notifications.ai_analysis.api_key_env"
+    ],
+    "notes": [
+      "OPENAI_API_KEY is only needed when AI analysis is enabled.",
+      "Webhook URLs and tokens are operator-supplied secrets stored in config.yaml."
+    ]
+  },
+  "security": {
+    "default_mode": "read-only collection with Guarded Automation dry_run enabled",
+    "privileged_operations": [
+      "Firewall ban and unban commands when auto_ban is enabled",
+      "Service restart commands when auto_heal is enabled"
+    ],
+    "requires_root_when_enabled": true,
+    "data_egress": [
+      "User-configured webhook endpoints",
+      "OpenAI API when AI analysis is enabled"
+    ]
+  },
   "scripts": {
     "agent": "python3 scripts/server_agent.py --config config.yaml --once",
     "report-daily": "python3 scripts/report_generator.py --config config.yaml pdf --range daily --send",
