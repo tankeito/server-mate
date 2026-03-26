@@ -6,7 +6,7 @@ English | [中文](README_ZH.md)
 
 > A two-plane monitoring system for Linux hosts running Nginx or Apache.
 
-[![Version](https://img.shields.io/badge/version-1.1.1-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-1.1.2-blue.svg)]()
 [![OpenClaw](https://img.shields.io/badge/OpenClaw-Skill-success.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Platform-CentOS%2FUbuntu%2FDebian-lightgrey.svg)](https://linux.org)
@@ -44,7 +44,7 @@ It splits responsibilities into two planes:
 
 ---
 
-## 🆕 What's New in v1.1.1
+## 🆕 What's New in v1.1.2
 
 ### Multi-Site Monitoring
 
@@ -72,7 +72,7 @@ It splits responsibilities into two planes:
 
 ### Configuration
 
-- **`config.example.yaml`**: Recommended starting point for v1.1.1 with multi-site, system_metrics, and Guarded Automation pre-configured
+- **`config.example.yaml`**: Recommended starting point for v1.1.2 with multi-site, system_metrics, and Guarded Automation pre-configured
 
 ---
 
@@ -82,8 +82,8 @@ It splits responsibilities into two planes:
 
 ```bash
 # Clone repository
-git clone https://github.com/tankeito/server-mate.git /opt/server-mate
-cd /opt/server-mate
+git clone https://github.com/tankeito/server-mate.git
+cd server-mate
 
 # Install dependencies
 python3 -m pip install psutil pyyaml matplotlib
@@ -96,7 +96,7 @@ python3 -m pip install geoip2
 
 Generate or edit `config.yaml`:
 
-For `1.1.1`, it is recommended to copy [`config.example.yaml`](config.example.yaml) to `config.yaml` first. The example already includes multi-site `sites[]`, global `system_metrics`, webhook channels, and Guarded Automation with `dry_run: true`.
+For `1.1.2`, it is recommended to copy [`config.example.yaml`](config.example.yaml) to `config.yaml` first. In OpenClaw, keep `config.yaml`, `metrics.db`, `logs/`, and `reports/` inside the current workspace (`./`).
 
 ```yaml
 agent:
@@ -106,11 +106,11 @@ agent:
   mode: once
 
 logs:
-  access_log: /var/log/nginx/access.log
-  error_log: /var/log/nginx/error.log
+  access_log: ./logs/access.log
+  error_log: ./logs/error.log
 
 storage:
-  database_file: /opt/server-mate/server_agent.sqlite3
+  database_file: ./metrics.db
   rollup_minutes: [10, 60]
 
 notifications:
@@ -120,7 +120,7 @@ notifications:
       url: https://oapi.dingtalk.com/robot/send?access_token=YOUR_TOKEN
   reports:
     report_language: zh
-    report_export_dir: /srv/reports/server-mate
+    report_export_dir: ./reports
     public_base_url: https://ops.example.com/reports
     daily:
       enabled: true
@@ -148,16 +148,16 @@ Add these lines:
 
 ```cron
 # Data collection every 10 minutes
-*/10 * * * * /usr/bin/python3 /opt/server-mate/scripts/server_agent.py --config /opt/server-mate/config.yaml --once >> /var/log/server-mate-agent.log 2>&1
+*/10 * * * * /usr/bin/env bash -lc 'python3 ./scripts/server_agent.py --config ./config.yaml --once >> ./logs/server-mate-agent.log 2>&1'
 
 # Daily PDF report at 01:00
-0 1 * * * /usr/bin/python3 /opt/server-mate/scripts/report_generator.py --config /opt/server-mate/config.yaml pdf --range daily --send >> /var/log/server-mate-report.log 2>&1
+0 1 * * * /usr/bin/env bash -lc 'python3 ./scripts/report_generator.py --config ./config.yaml pdf --range daily --send >> ./logs/server-mate-report.log 2>&1'
 
 # Weekly PDF report every Monday at 01:10
-10 1 * * 1 /usr/bin/python3 /opt/server-mate/scripts/report_generator.py --config /opt/server-mate/config.yaml pdf --range weekly --send >> /var/log/server-mate-report.log 2>&1
+10 1 * * 1 /usr/bin/env bash -lc 'python3 ./scripts/report_generator.py --config ./config.yaml pdf --range weekly --send >> ./logs/server-mate-report.log 2>&1'
 
 # Monthly PDF report on 1st at 01:20
-20 1 1 * * /usr/bin/python3 /opt/server-mate/scripts/report_generator.py --config /opt/server-mate/config.yaml pdf --range monthly --send >> /var/log/server-mate-report.log 2>&1
+20 1 1 * * /usr/bin/env bash -lc 'python3 ./scripts/report_generator.py --config ./config.yaml pdf --range monthly --send >> ./logs/server-mate-report.log 2>&1'
 ```
 
 ---

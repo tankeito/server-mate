@@ -1,6 +1,6 @@
 {
   "name": "server-mate",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Lightweight server monitoring and AI operations workflow for Linux hosts running Nginx or Apache",
   "author": "tankeito",
   "license": "MIT",
@@ -63,13 +63,14 @@
   ],
   "environment_variables": {
     "required": [],
-    "optional": [
+    "optional": [],
+    "managed_by_runtime": [
       "OPENAI_API_KEY"
     ],
     "primary": "OPENAI_API_KEY"
   },
   "credentials": {
-    "optional_env": [
+    "managed_env": [
       "OPENAI_API_KEY"
     ],
     "config_secrets": [
@@ -77,7 +78,7 @@
       "notifications.ai_analysis.api_key_env"
     ],
     "notes": [
-      "OPENAI_API_KEY is only needed when AI analysis is enabled.",
+      "OPENAI_API_KEY is injected by the OpenClaw runtime when AI analysis is enabled.",
       "Webhook URLs and tokens are operator-supplied secrets stored in config.yaml."
     ]
   },
@@ -94,16 +95,18 @@
     ]
   },
   "scripts": {
-    "agent": "python3 scripts/server_agent.py --config config.yaml --once",
-    "report-daily": "python3 scripts/report_generator.py --config config.yaml pdf --range daily --send",
-    "report-weekly": "python3 scripts/report_generator.py --config config.yaml pdf --range weekly --send",
-    "report-monthly": "python3 scripts/report_generator.py --config config.yaml pdf --range monthly --send"
+    "agent": "python3 ./scripts/server_agent.py --config ./config.yaml --once",
+    "report-daily": "python3 ./scripts/report_generator.py --config ./config.yaml pdf --range daily --send",
+    "report-weekly": "python3 ./scripts/report_generator.py --config ./config.yaml pdf --range weekly --send",
+    "report-monthly": "python3 ./scripts/report_generator.py --config ./config.yaml pdf --range monthly --send"
   },
   "config": {
-    "default_config_file": "config.yaml",
-    "default_log_dir": "/var/log/server-mate/",
-    "default_data_dir": "/opt/server-mate/"
+    "default_config_file": "./config.yaml",
+    "default_database_file": "./metrics.db",
+    "default_log_dir": "./logs/",
+    "default_report_dir": "./reports/",
+    "default_data_dir": "./"
   },
   "created_at": "2026-03-26",
-  "updated_at": "2026-03-26"
+  "updated_at": "2026-03-27"
 }

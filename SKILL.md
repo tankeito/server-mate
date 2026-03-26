@@ -1,6 +1,6 @@
 ---
 name: server-mate
-version: 1.1.1
+version: 1.1.2
 description: Build or extend a lightweight server monitoring and AI operations workflow for Linux hosts running Nginx or Apache. Use when Codex needs to collect psutil metrics, parse access or error logs, design JSON payloads or APIs, add webhook alerts, generate daily or weekly ops reports, answer natural-language monitoring questions, or implement guarded auto-ban and auto-heal behaviors.
 homepage: https://github.com/tankeito/server-mate
 metadata:
@@ -15,7 +15,7 @@ metadata:
 
 # Server Mate
 
-Version: `1.1.1`
+Version: `1.1.2`
 
 Use this skill to design or implement a two-plane monitoring system:
 - a Python agent on the server that tails logs and samples host metrics
@@ -25,7 +25,7 @@ Use this skill to design or implement a two-plane monitoring system:
 
 - Confirm the environment first: Linux distribution, Nginx or Apache, PHP-FPM layout, log paths, webhook target, and whether automated actions may touch a live host.
 - Keep collection read-only until the user explicitly asks for automation. Add alerting before any auto-ban or auto-heal behavior.
-- Treat `OPENAI_API_KEY` as required only when optional AI analysis is enabled. Treat webhook URLs or tokens in `config.yaml` as secrets and do not commit them.
+- In OpenClaw deployments, `OPENAI_API_KEY` is injected by the runtime when AI analysis is enabled. Do not ask the user to export it manually. Treat webhook URLs or tokens in `config.yaml` as secrets and do not commit them.
 - Treat auto-ban and auto-heal as privileged features. They may execute operator-supplied firewall or service restart commands and should stay disabled or `dry_run: true` until reviewed.
 - Use the references progressively instead of loading everything at once:
   - Read [references/architecture.md](references/architecture.md) for overall design, component boundaries, and rollout order.
@@ -55,7 +55,8 @@ Use this skill to design or implement a two-plane monitoring system:
 ## Agent rules
 
 - Prefer Python, `psutil`, and the standard library for the first implementation.
-- Prefer a generated `config.yaml` plus SQLite for local state and historical rollups before adding external services.
+- Prefer a generated `./config.yaml` plus local SQLite state such as `./metrics.db` before adding external services.
+- Keep generated artifacts inside the current skill workspace by default: `./config.yaml`, `./metrics.db`, `./logs/`, and `./reports/`. Do not default to `/opt`, `/var/log`, or other system-wide directories.
 - Prefer the `system_metrics + sites[]` matrix layout from [config.example.yaml](config.example.yaml) instead of new single-site keys.
 - Support configurable log paths. Do not hardcode site layouts when the vhost config can be read instead.
 - Emit structured JSON with timezone-aware timestamps, host or site identifiers, event type, and enough raw context to debug parser mistakes.
@@ -105,7 +106,7 @@ Use external scheduling for production unless the user explicitly wants an alway
   - Monthly PDF push on day `1` at `01:20`.
 - In multi-site mode, a single scheduled `report_generator.py` run should iterate over every configured site unless the user explicitly passes `--site`.
 
-## Release notes for 1.1.1
+## Release notes for 1.1.2
 
 - Multi-site matrix config using `sites[]` plus global `system_metrics`
 - Host-global metrics stored separately from site-local business rollups
@@ -115,10 +116,10 @@ Use external scheduling for production unless the user explicitly wants an alway
 Copyable cron examples:
 
 ```cron
-*/10 * * * * /usr/bin/python3 /opt/server-mate/scripts/server_agent.py --config /opt/server-mate/config.yaml --once >> /var/log/server-mate-agent.log 2>&1
-0 1 * * * /usr/bin/python3 /opt/server-mate/scripts/report_generator.py --config /opt/server-mate/config.yaml pdf --range daily --send >> /var/log/server-mate-report.log 2>&1
-10 1 * * 1 /usr/bin/python3 /opt/server-mate/scripts/report_generator.py --config /opt/server-mate/config.yaml pdf --range weekly --send >> /var/log/server-mate-report.log 2>&1
-20 1 1 * * /usr/bin/python3 /opt/server-mate/scripts/report_generator.py --config /opt/server-mate/config.yaml pdf --range monthly --send >> /var/log/server-mate-report.log 2>&1
+*/10 * * * * /usr/bin/env bash -lc 'python3 ./scripts/server_agent.py --config ./config.yaml --once >> ./logs/server-mate-agent.log 2>&1'
+0 1 * * * /usr/bin/env bash -lc 'python3 ./scripts/report_generator.py --config ./config.yaml pdf --range daily --send >> ./logs/server-mate-report.log 2>&1'
+10 1 * * 1 /usr/bin/env bash -lc 'python3 ./scripts/report_generator.py --config ./config.yaml pdf --range weekly --send >> ./logs/server-mate-report.log 2>&1'
+20 1 1 * * /usr/bin/env bash -lc 'python3 ./scripts/report_generator.py --config ./config.yaml pdf --range monthly --send >> ./logs/server-mate-report.log 2>&1'
 ```
 
 Systemd note:

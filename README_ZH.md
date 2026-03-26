@@ -6,7 +6,7 @@
 
 > 专为运行 Nginx 或 Apache 的 Linux 主机设计的双平面监控系统。
 
-[![Version](https://img.shields.io/badge/version-1.1.1-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-1.1.2-blue.svg)]()
 [![OpenClaw](https://img.shields.io/badge/OpenClaw-Skill-success.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Platform-CentOS%2FUbuntu%2FDebian-lightgrey.svg)](https://linux.org)
@@ -44,7 +44,7 @@
 
 ---
 
-## 🆕 v1.1.1 新功能
+## 🆕 v1.1.2 新功能
 
 ### 多站点监控
 
@@ -72,7 +72,7 @@
 
 ### 配置
 
-- **`config.example.yaml`**：v1.1.1 的推荐起点，预配置多站点、system_metrics 和 Guarded Automation
+- **`config.example.yaml`**：v1.1.2 的推荐起点，预配置多站点、system_metrics 和 Guarded Automation
 
 ---
 
@@ -82,8 +82,8 @@
 
 ```bash
 # 克隆仓库
-git clone https://github.com/tankeito/server-mate.git /opt/server-mate
-cd /opt/server-mate
+git clone https://github.com/tankeito/server-mate.git
+cd server-mate
 
 # 安装依赖
 python3 -m pip install psutil pyyaml matplotlib
@@ -96,7 +96,7 @@ python3 -m pip install geoip2
 
 生成或编辑 `config.yaml`：
 
-从 `1.1.1` 开始，建议优先复制 [`config.example.yaml`](config.example.yaml) 为 `config.yaml`。该模板已经包含多站点 `sites[]`、全局 `system_metrics`、Webhook 渠道以及默认安全开启的 Guarded Automation 配置。
+从 `1.1.2` 开始，建议优先复制 [`config.example.yaml`](config.example.yaml) 为 `config.yaml`。在 OpenClaw 中，请将 `config.yaml`、`metrics.db`、`logs/` 和 `reports/` 全部保留在当前工作目录 `./` 下。
 
 ```yaml
 agent:
@@ -106,11 +106,11 @@ agent:
   mode: once
 
 logs:
-  access_log: /var/log/nginx/access.log
-  error_log: /var/log/nginx/error.log
+  access_log: ./logs/access.log
+  error_log: ./logs/error.log
 
 storage:
-  database_file: /opt/server-mate/server_agent.sqlite3
+  database_file: ./metrics.db
   rollup_minutes: [10, 60]
 
 notifications:
@@ -120,7 +120,7 @@ notifications:
       url: https://oapi.dingtalk.com/robot/send?access_token=YOUR_TOKEN
   reports:
     report_language: zh
-    report_export_dir: /srv/reports/server-mate
+    report_export_dir: ./reports
     public_base_url: https://ops.example.com/reports
     daily:
       enabled: true
@@ -148,16 +148,16 @@ crontab -e
 
 ```cron
 # 每 10 分钟采集数据
-*/10 * * * * /usr/bin/python3 /opt/server-mate/scripts/server_agent.py --config /opt/server-mate/config.yaml --once >> /var/log/server-mate-agent.log 2>&1
+*/10 * * * * /usr/bin/env bash -lc 'python3 ./scripts/server_agent.py --config ./config.yaml --once >> ./logs/server-mate-agent.log 2>&1'
 
 # 每天 01:00 生成日报 PDF
-0 1 * * * /usr/bin/python3 /opt/server-mate/scripts/report_generator.py --config /opt/server-mate/config.yaml pdf --range daily --send >> /var/log/server-mate-report.log 2>&1
+0 1 * * * /usr/bin/env bash -lc 'python3 ./scripts/report_generator.py --config ./config.yaml pdf --range daily --send >> ./logs/server-mate-report.log 2>&1'
 
 # 每周一 01:10 生成周报 PDF
-10 1 * * 1 /usr/bin/python3 /opt/server-mate/scripts/report_generator.py --config /opt/server-mate/config.yaml pdf --range weekly --send >> /var/log/server-mate-report.log 2>&1
+10 1 * * 1 /usr/bin/env bash -lc 'python3 ./scripts/report_generator.py --config ./config.yaml pdf --range weekly --send >> ./logs/server-mate-report.log 2>&1'
 
 # 每月 1 号 01:20 生成月报 PDF
-20 1 1 * * /usr/bin/python3 /opt/server-mate/scripts/report_generator.py --config /opt/server-mate/config.yaml pdf --range monthly --send >> /var/log/server-mate-report.log 2>&1
+20 1 1 * * /usr/bin/env bash -lc 'python3 ./scripts/report_generator.py --config ./config.yaml pdf --range monthly --send >> ./logs/server-mate-report.log 2>&1'
 ```
 
 ---
