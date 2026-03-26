@@ -5,9 +5,9 @@ English | [中文](README_ZH.md)
 # 🖥️ Server-Mate | Lightweight Server Monitoring & AI Ops
 
 > A two-plane monitoring system for Linux hosts running Nginx or Apache.
->
-> Version: `1.1.0`
 
+[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)]()
+[![OpenClaw](https://img.shields.io/badge/OpenClaw-Skill-success.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Platform-CentOS%2FUbuntu%2FDebian-lightgrey.svg)](https://linux.org)
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://python.org)
