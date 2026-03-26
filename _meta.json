@@ -1,7 +1,7 @@
 {
   "name": "server-mate",
   "version": "1.0.0",
-  "description": "Lightweight server monitoring and AI operations workflow for CentOS hosts running Baota/BT Panel with Nginx or Apache",
+  "description": "Lightweight server monitoring and AI operations workflow for Linux hosts running Nginx or Apache",
   "author": "tankeito",
   "license": "MIT",
   "homepage": "https://github.com/tankeito/server-mate",
@@ -12,9 +12,7 @@
   "keywords": [
     "server-monitoring",
     "ai-ops",
-    "centos",
-    "baota",
-    "bt-panel",
+    "linux",
     "nginx",
     "apache",
     "log-analysis",

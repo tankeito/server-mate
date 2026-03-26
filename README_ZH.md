@@ -4,18 +4,18 @@
 
 # 🖥️ Server-Mate | 轻量级服务器监控与 AI 运维
 
-> 专为运行 Baota/BT 面板的 CentOS 主机设计的双平面监控系统。
+> 专为运行 Nginx 或 Apache 的 Linux 主机设计的双平面监控系统。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Platform-CentOS%2FUbuntu%2FDebian-lightgrey.svg)](https://linux.org)
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://python.org)
-[![Panel](https://img.shields.io/badge/Panel-Baota%2FBT-orange.svg)](https://www.bt.cn)
+[![Web Server](https://img.shields.io/badge/Web%20Server-Nginx%2FApache-orange.svg)](https://nginx.org)
 
 ---
 
 ## 📖 项目简介
 
-**Server-Mate** 是一个专为运行 Baota/BT 面板的 CentOS 主机设计的轻量级服务器监控与 AI 运维工作流。
+**Server-Mate** 是一个专为运行 Nginx 或 Apache 的 Linux 主机设计的轻量级服务器监控与 AI 运维工作流。
 
 它将职责分为两个平面：
 - **服务器代理**：Python 采集器，通过 `psutil` 采集主机指标和日志
@@ -34,7 +34,7 @@
 
 ### 🎯 使用场景
 
-- 监控 Baota/BT 面板管理的服务器，无需替换现有栈
+- 监控 Linux 服务器，无需替换现有栈
 - 获取 AI 驱动的错误解释，而非原始日志转储
 - 自动化日报/周报，包含流量趋势和安全洞察
 - 检测可疑 IP、404 扫描爆发、5xx 错误峰值
@@ -70,8 +70,8 @@ agent:
   mode: once
 
 logs:
-  access_log: /www/wwwlogs/example.com.log
-  error_log: /www/server/panel/vhost/nginx/example.com.error.log
+  access_log: /var/log/nginx/access.log
+  error_log: /var/log/nginx/error.log
 
 storage:
   database_file: /opt/server-mate/server_agent.sqlite3

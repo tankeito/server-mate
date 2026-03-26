@@ -4,18 +4,18 @@ English | [中文](README_ZH.md)
 
 # 🖥️ Server-Mate | Lightweight Server Monitoring & AI Ops
 
-> A two-plane monitoring system for CentOS hosts running Baota/BT Panel with Nginx or Apache.
+> A two-plane monitoring system for Linux hosts running Nginx or Apache.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Platform-CentOS%2FUbuntu%2FDebian-lightgrey.svg)](https://linux.org)
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://python.org)
-[![Panel](https://img.shields.io/badge/Panel-Baota%2FBT-orange.svg)](https://www.bt.cn)
+[![Web Server](https://img.shields.io/badge/Web%20Server-Nginx%2FApache-orange.svg)](https://nginx.org)
 
 ---
 
 ## 📖 Overview
 
-**Server-Mate** is a lightweight server monitoring and AI operations workflow designed for CentOS hosts running Baota/BT Panel with Nginx or Apache.
+**Server-Mate** is a lightweight server monitoring and AI operations workflow designed for Linux hosts running Nginx or Apache.
 
 It splits responsibilities into two planes:
 - **Server Agent**: Python collector that tails logs and samples host metrics via `psutil`
@@ -34,7 +34,7 @@ It splits responsibilities into two planes:
 
 ### 🎯 Use Cases
 
-- Monitor Baota/BT Panel managed servers without replacing existing stack
+- Monitor Linux servers without replacing existing stack
 - Get AI-powered error explanations instead of raw log dumps
 - Automated daily/weekly ops reports with traffic trends and security insights
 - Detect suspicious IPs, 404 scan bursts, and 5xx error spikes
@@ -70,8 +70,8 @@ agent:
   mode: once
 
 logs:
-  access_log: /www/wwwlogs/example.com.log
-  error_log: /www/server/panel/vhost/nginx/example.com.error.log
+  access_log: /var/log/nginx/access.log
+  error_log: /var/log/nginx/error.log
 
 storage:
   database_file: /opt/server-mate/server_agent.sqlite3

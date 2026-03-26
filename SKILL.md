@@ -1,6 +1,6 @@
 ---
 name: server-mate
-description: Build or extend a lightweight server monitoring and AI operations workflow for CentOS hosts running Baota/BT Panel with Nginx or Apache. Use when Codex needs to collect psutil metrics, parse access or error logs, design JSON payloads or APIs, add webhook alerts, generate daily or weekly ops reports, answer natural-language monitoring questions, or implement guarded auto-ban and auto-heal behaviors.
+description: Build or extend a lightweight server monitoring and AI operations workflow for Linux hosts running Nginx or Apache. Use when Codex needs to collect psutil metrics, parse access or error logs, design JSON payloads or APIs, add webhook alerts, generate daily or weekly ops reports, answer natural-language monitoring questions, or implement guarded auto-ban and auto-heal behaviors.
 ---
 
 # Server Mate
@@ -11,7 +11,7 @@ Use this skill to design or implement a two-plane monitoring system:
 
 ## Start
 
-- Confirm the environment first: CentOS version, Baota/BT usage, Nginx or Apache, PHP-FPM layout, log paths, webhook target, and whether automated actions may touch a live host.
+- Confirm the environment first: Linux distribution, Nginx or Apache, PHP-FPM layout, log paths, webhook target, and whether automated actions may touch a live host.
 - Keep collection read-only until the user explicitly asks for automation. Add alerting before any auto-ban or auto-heal behavior.
 - Use the references progressively instead of loading everything at once:
   - Read [references/architecture.md](references/architecture.md) for overall design, component boundaries, and rollout order.
@@ -42,7 +42,7 @@ Use this skill to design or implement a two-plane monitoring system:
 
 - Prefer Python, `psutil`, and the standard library for the first implementation.
 - Prefer a generated `config.yaml` plus SQLite for local state and historical rollups before adding external services.
-- Support configurable log paths. Do not hardcode one Baota site layout when the vhost config can be read instead.
+- Support configurable log paths. Do not hardcode site layouts when the vhost config can be read instead.
 - Emit structured JSON with timezone-aware timestamps, host or site identifiers, event type, and enough raw context to debug parser mistakes.
 - Separate parsing, aggregation, transport, and action execution so that HTTP push, stdout replay, file drop, or websocket transport can be swapped independently.
 - Keep unknown lines and parser failures as first-class counters instead of dropping them silently.
