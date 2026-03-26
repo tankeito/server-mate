@@ -8,12 +8,14 @@ import collections
 import copy
 import datetime as dt
 import hashlib
+import ipaddress
 import json
 import re
 import shlex
 import socket
 import sqlite3
 import statistics
+import subprocess
 import time
 import traceback
 from pathlib import Path
@@ -104,13 +106,23 @@ ERROR_RULES = [
     ("php_fatal", ["php fatal"]),
 ]
 
+HOST_METRIC_SITE = "__host__"
+DEFAULT_AUTOMATION_WHITELIST_IPS = [
+    "127.0.0.1",
+    "::1",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "100.64.0.0/10",
+]
+DEFAULT_AUTOMATION_WHITELIST_SPIDERS = ["googlebot", "baiduspider", "bingbot"]
+
 DEFAULT_CONFIG = {
     "agent": {
         "host_id": socket.gethostname(),
         "site": "default",
         "site_host": "",
         "timezone": "Asia/Shanghai",
-        "disk_root": "/",
         "mode": "once",
         "poll_interval_seconds": 60,
         "state_file": "./server_agent_state.json",
@@ -120,10 +132,24 @@ DEFAULT_CONFIG = {
         "max_buffer_events": 20000,
         "emit_events": False,
     },
+    "system_metrics": {
+        "enabled": True,
+        "disk_root": "/",
+        "collect_network_io": True,
+    },
     "logs": {
         "access_log": "./access.log",
         "error_log": "./error.log",
     },
+    "sites": [
+        {
+            "domain": "default",
+            "site_host": "",
+            "enabled": True,
+            "access_log": "./access.log",
+            "error_log": "./error.log",
+        }
+    ],
     "thresholds": {
         "summary_window_minutes": 10,
         "slow_ms": 2000.0,
@@ -209,14 +235,35 @@ DEFAULT_CONFIG = {
             },
         },
     },
+    "automation": {
+        "dry_run": True,
+        "auto_ban": {
+            "enabled": False,
+            "channels": ["dingtalk"],
+            "whitelist_ips": DEFAULT_AUTOMATION_WHITELIST_IPS,
+            "whitelist_spiders": DEFAULT_AUTOMATION_WHITELIST_SPIDERS,
+            "ban_ttl_seconds": 86400,
+            "timeout_seconds": 15,
+            "max_active_bans": 200,
+            "command_template": "iptables -I INPUT -s {ip} -j DROP",
+            "unban_command_template": "iptables -D INPUT -s {ip} -j DROP",
+        },
+        "auto_heal": {
+            "enabled": False,
+            "channels": ["dingtalk"],
+            "services": ["php-fpm"],
+            "trigger_kinds": ["server_error_burst"],
+            "cooldown_seconds": 3600,
+            "timeout_seconds": 30,
+            "command_template": "systemctl restart {service}",
+        },
+    },
 }
 
 DEFAULT_STATE = {
-    "cursors": {},
-    "history": {
-        "access_events": [],
-        "error_events": [],
-        "system_snapshots": [],
+    "sites": {},
+    "system_history": {
+        "snapshots": [],
     },
     "delivery": {
         "alert_cooldowns": {},
@@ -272,6 +319,37 @@ CREATE TABLE IF NOT EXISTS metric_rollups (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(host_id, site, bucket_start, bucket_minutes)
+);
+
+CREATE TABLE IF NOT EXISTS automation_actions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    host_id TEXT NOT NULL,
+    site TEXT NOT NULL,
+    action_type TEXT NOT NULL,
+    target TEXT,
+    reason TEXT NOT NULL,
+    status TEXT NOT NULL,
+    dry_run INTEGER NOT NULL DEFAULT 0,
+    command_text TEXT,
+    stdout TEXT,
+    stderr TEXT,
+    metadata_json TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS banned_ips (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    host_id TEXT NOT NULL,
+    site TEXT NOT NULL,
+    ip_address TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    command_text TEXT,
+    dry_run INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    lifted_at TEXT,
+    lift_status TEXT,
+    unban_command_text TEXT
 );
 """
 
@@ -367,12 +445,175 @@ def normalize_clock_time(value: Any, default: str) -> str:
     return f"{hour:02d}:{minute:02d}"
 
 
+def normalize_ip_whitelist(value: Any) -> list[str]:
+    if isinstance(value, str):
+        items = [value]
+    elif isinstance(value, list):
+        items = value
+    else:
+        items = list(DEFAULT_AUTOMATION_WHITELIST_IPS)
+    normalized: list[str] = []
+    for item in items:
+        text = str(item or "").strip()
+        if text and text not in normalized:
+            normalized.append(text)
+    for fallback in DEFAULT_AUTOMATION_WHITELIST_IPS:
+        if fallback not in normalized:
+            normalized.append(fallback)
+    return normalized
+
+
+def default_site_state() -> dict[str, Any]:
+    return {
+        "cursors": {},
+        "history": {
+            "access_events": [],
+            "error_events": [],
+        },
+    }
+
+
+def normalize_site_entry(
+    raw_site: Any,
+    index: int,
+    base_dir: Path,
+    fallback_access_log: Any = None,
+    fallback_error_log: Any = None,
+) -> dict[str, Any]:
+    site_data = raw_site if isinstance(raw_site, dict) else {}
+    domain = str(
+        site_data.get("domain")
+        or site_data.get("site")
+        or site_data.get("name")
+        or f"site-{index}"
+    ).strip()
+    site_host = str(site_data.get("site_host") or site_data.get("host") or domain).strip()
+    access_log_value = site_data.get("access_log")
+    error_log_value = site_data.get("error_log")
+    if not access_log_value and fallback_access_log is not None:
+        access_log_value = fallback_access_log
+    if not error_log_value and fallback_error_log is not None:
+        error_log_value = fallback_error_log
+    return {
+        "domain": domain or f"site-{index}",
+        "site_host": site_host or domain or f"site-{index}",
+        "enabled": bool(site_data.get("enabled", True)),
+        "access_log": str(resolve_config_path(base_dir, access_log_value or f"./site-{index}.access.log")),
+        "error_log": str(resolve_config_path(base_dir, error_log_value or f"./site-{index}.error.log")),
+    }
+
+
+def normalize_sites_config(config: dict[str, Any], base_dir: Path) -> list[dict[str, Any]]:
+    agent = config.setdefault("agent", {})
+    logs = config.setdefault("logs", {})
+    raw_sites = config.get("sites")
+    site_entries = raw_sites if isinstance(raw_sites, list) and raw_sites else None
+
+    if not site_entries:
+        site_entries = [
+            {
+                "domain": agent.get("site") or "default",
+                "site_host": agent.get("site_host") or agent.get("site") or "default",
+                "enabled": True,
+                "access_log": logs.get("access_log"),
+                "error_log": logs.get("error_log"),
+            }
+        ]
+
+    normalized: list[dict[str, Any]] = []
+    seen_domains: set[str] = set()
+    for index, raw_site in enumerate(site_entries, start=1):
+        site = normalize_site_entry(
+            raw_site,
+            index,
+            base_dir,
+            logs.get("access_log") if index == 1 else None,
+            logs.get("error_log") if index == 1 else None,
+        )
+        domain_key = site["domain"].lower()
+        if domain_key in seen_domains:
+            continue
+        seen_domains.add(domain_key)
+        normalized.append(site)
+
+    if not normalized:
+        normalized.append(
+            normalize_site_entry(
+                {"domain": "default", "enabled": True},
+                1,
+                base_dir,
+                logs.get("access_log"),
+                logs.get("error_log"),
+            )
+        )
+
+    first_site = normalized[0]
+    agent["site"] = first_site["domain"]
+    agent["site_host"] = first_site["site_host"]
+    logs["access_log"] = first_site["access_log"]
+    logs["error_log"] = first_site["error_log"]
+    config["sites"] = normalized
+    return normalized
+
+
+def resolve_sites(config: dict[str, Any], enabled_only: bool = True) -> list[dict[str, Any]]:
+    sites = config.get("sites")
+    if not isinstance(sites, list):
+        return []
+    if not enabled_only:
+        return [dict(site) for site in sites if isinstance(site, dict)]
+    return [dict(site) for site in sites if isinstance(site, dict) and bool(site.get("enabled", True))]
+
+
+def find_site(config: dict[str, Any], site_name: str | None) -> dict[str, Any] | None:
+    if not site_name:
+        return None
+    needle = str(site_name).strip().lower()
+    for site in resolve_sites(config, enabled_only=False):
+        aliases = {
+            str(site.get("domain") or "").strip().lower(),
+            str(site.get("site_host") or "").strip().lower(),
+        }
+        if needle in aliases:
+            return site
+    return None
+
+
+def build_site_runtime_config(config: dict[str, Any], site: dict[str, Any]) -> dict[str, Any]:
+    runtime_config = copy.deepcopy(config)
+    runtime_config.setdefault("agent", {})
+    runtime_config.setdefault("logs", {})
+    runtime_config["agent"]["site"] = str(site.get("domain") or runtime_config["agent"].get("site") or "default")
+    runtime_config["agent"]["site_host"] = str(
+        site.get("site_host") or runtime_config["agent"]["site"]
+    )
+    runtime_config["logs"]["access_log"] = str(site.get("access_log") or runtime_config["logs"].get("access_log") or "")
+    runtime_config["logs"]["error_log"] = str(site.get("error_log") or runtime_config["logs"].get("error_log") or "")
+    return runtime_config
+
+
+def ensure_site_state(state: dict[str, Any], domain: str) -> dict[str, Any]:
+    sites_state = state.setdefault("sites", {})
+    site_state = sites_state.get(domain)
+    if not isinstance(site_state, dict):
+        site_state = default_site_state()
+        sites_state[domain] = site_state
+    else:
+        site_state.setdefault("cursors", {})
+        history = site_state.setdefault("history", {})
+        history.setdefault("access_events", [])
+        history.setdefault("error_events", [])
+    return site_state
+
+
 def normalize_config(config: dict[str, Any], config_path: Path) -> dict[str, Any]:
     agent = config.setdefault("agent", {})
     logs = config.setdefault("logs", {})
+    system_metrics = config.setdefault("system_metrics", {})
     thresholds = config.setdefault("thresholds", {})
     storage = config.setdefault("storage", {})
     notifications = config.setdefault("notifications", {})
+    automation = config.setdefault("automation", {})
     webhooks = notifications.setdefault("webhooks", {})
     alerts_config = notifications.setdefault("alerts", {})
     reports_config = notifications.setdefault("reports", {})
@@ -380,10 +621,7 @@ def normalize_config(config: dict[str, Any], config_path: Path) -> dict[str, Any
     base_dir = config_path.parent.resolve()
 
     agent["host_id"] = str(agent.get("host_id") or socket.gethostname())
-    agent["site"] = str(agent.get("site") or "default")
-    agent["site_host"] = str(agent.get("site_host") or agent["site"])
     agent["timezone"] = str(agent.get("timezone") or "UTC")
-    agent["disk_root"] = str(agent.get("disk_root") or "/")
     agent["mode"] = str(agent.get("mode") or "once").lower()
     agent["poll_interval_seconds"] = max(int(agent.get("poll_interval_seconds", 60)), 1)
     agent["startup_mode"] = str(agent.get("startup_mode") or "tail").lower()
@@ -393,8 +631,15 @@ def normalize_config(config: dict[str, Any], config_path: Path) -> dict[str, Any
     agent["emit_events"] = bool(agent.get("emit_events", False))
     agent["state_file"] = str(resolve_config_path(base_dir, agent.get("state_file")))
 
-    logs["access_log"] = str(resolve_config_path(base_dir, logs.get("access_log")))
-    logs["error_log"] = str(resolve_config_path(base_dir, logs.get("error_log")))
+    system_metrics["enabled"] = bool(system_metrics.get("enabled", True))
+    system_metrics["disk_root"] = str(
+        system_metrics.get("disk_root") or agent.get("disk_root") or "/"
+    )
+    system_metrics["collect_network_io"] = bool(
+        system_metrics.get("collect_network_io", True)
+    )
+
+    normalize_sites_config(config, base_dir)
 
     thresholds["summary_window_minutes"] = max(
         int(thresholds.get("summary_window_minutes", 10)),
@@ -584,6 +829,49 @@ def normalize_config(config: dict[str, Any], config_path: Path) -> dict[str, Any
     if not monthly_report["public_base_url"]:
         monthly_report["public_base_url"] = reports_config["public_base_url"]
 
+    automation["dry_run"] = bool(automation.get("dry_run", True))
+
+    auto_ban = automation.setdefault("auto_ban", {})
+    auto_ban["enabled"] = bool(auto_ban.get("enabled", False))
+    auto_ban["channels"] = normalize_string_list(
+        auto_ban.get("channels"),
+        alerts_config.get("channels") or ["dingtalk"],
+    )
+    auto_ban["whitelist_ips"] = normalize_ip_whitelist(auto_ban.get("whitelist_ips"))
+    auto_ban["whitelist_spiders"] = normalize_string_list(
+        auto_ban.get("whitelist_spiders"),
+        list(DEFAULT_AUTOMATION_WHITELIST_SPIDERS),
+    )
+    auto_ban["ban_ttl_seconds"] = max(int(auto_ban.get("ban_ttl_seconds", 86400)), 60)
+    auto_ban["timeout_seconds"] = max(int(auto_ban.get("timeout_seconds", 15)), 1)
+    auto_ban["max_active_bans"] = max(int(auto_ban.get("max_active_bans", 200)), 1)
+    auto_ban["command_template"] = str(
+        auto_ban.get("command_template") or "iptables -I INPUT -s {ip} -j DROP"
+    ).strip()
+    auto_ban["unban_command_template"] = str(
+        auto_ban.get("unban_command_template") or "iptables -D INPUT -s {ip} -j DROP"
+    ).strip()
+
+    auto_heal = automation.setdefault("auto_heal", {})
+    auto_heal["enabled"] = bool(auto_heal.get("enabled", False))
+    auto_heal["channels"] = normalize_string_list(
+        auto_heal.get("channels"),
+        alerts_config.get("channels") or ["dingtalk"],
+    )
+    auto_heal["services"] = normalize_string_list(
+        auto_heal.get("services"),
+        ["php-fpm"],
+    )
+    auto_heal["trigger_kinds"] = normalize_string_list(
+        auto_heal.get("trigger_kinds"),
+        ["server_error_burst"],
+    )
+    auto_heal["cooldown_seconds"] = max(int(auto_heal.get("cooldown_seconds", 3600)), 60)
+    auto_heal["timeout_seconds"] = max(int(auto_heal.get("timeout_seconds", 30)), 1)
+    auto_heal["command_template"] = str(
+        auto_heal.get("command_template") or "systemctl restart {service}"
+    ).strip()
+
     minimum_retention = max(
         storage["rollup_minutes"]
         + [
@@ -611,6 +899,35 @@ def load_config(path: Path) -> tuple[dict[str, Any], bool]:
         raise ValueError("Config file must contain a top-level mapping.")
     config = normalize_config(deep_merge(DEFAULT_CONFIG, loaded), path)
     return config, generated
+
+
+def migrate_state_shape(state: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    migrated = deep_merge(DEFAULT_STATE, state if isinstance(state, dict) else {})
+    sites = resolve_sites(config, enabled_only=False)
+    primary_site = sites[0]["domain"] if sites else str(config.get("agent", {}).get("site") or "default")
+
+    legacy_cursors = migrated.pop("cursors", None)
+    legacy_history = migrated.pop("history", None)
+    if (legacy_cursors or legacy_history) and primary_site:
+        site_state = ensure_site_state(migrated, primary_site)
+        if isinstance(legacy_cursors, dict):
+            site_state["cursors"] = deep_merge(site_state.get("cursors", {}), legacy_cursors)
+        if isinstance(legacy_history, dict):
+            if legacy_history.get("access_events"):
+                site_state["history"]["access_events"] = list(legacy_history.get("access_events") or []) + list(site_state["history"].get("access_events") or [])
+            if legacy_history.get("error_events"):
+                site_state["history"]["error_events"] = list(legacy_history.get("error_events") or []) + list(site_state["history"].get("error_events") or [])
+            if legacy_history.get("system_snapshots"):
+                migrated.setdefault("system_history", {}).setdefault("snapshots", [])
+                migrated["system_history"]["snapshots"] = list(legacy_history.get("system_snapshots") or []) + list(migrated["system_history"].get("snapshots") or [])
+
+    migrated.setdefault("sites", {})
+    for site in sites:
+        ensure_site_state(migrated, str(site.get("domain") or "default"))
+
+    migrated.setdefault("system_history", {})
+    migrated["system_history"].setdefault("snapshots", [])
+    return migrated
 
 
 def load_state(path: Path) -> dict[str, Any]:
@@ -643,6 +960,12 @@ def init_database(path: Path) -> sqlite3.Connection:
         """
         CREATE INDEX IF NOT EXISTS idx_metric_rollups_bucket
         ON metric_rollups (host_id, site, bucket_minutes, bucket_start);
+
+        CREATE INDEX IF NOT EXISTS idx_automation_actions_lookup
+        ON automation_actions (host_id, site, action_type, created_at);
+
+        CREATE INDEX IF NOT EXISTS idx_banned_ips_active
+        ON banned_ips (host_id, site, ip_address, expires_at, lifted_at);
 
         CREATE TABLE IF NOT EXISTS status_code_rollups (
             rollup_id INTEGER NOT NULL,
@@ -788,8 +1111,31 @@ def event_timestamp(event: dict[str, Any]) -> dt.datetime | None:
 def read_tail_lines(path: Path | None, max_lines: int) -> list[str]:
     if not path or not path.exists() or max_lines <= 0:
         return []
-    with path.open("r", encoding="utf-8", errors="replace") as handle:
-        return list(collections.deque(handle, maxlen=max_lines))
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            return list(collections.deque(handle, maxlen=max_lines))
+    except OSError:
+        return []
+
+
+def build_log_cursor(
+    path: Path,
+    offset: int,
+    inode: int | None,
+    cursor: dict[str, Any] | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    next_cursor = dict(cursor or {})
+    next_cursor.update(
+        {
+            "offset": max(int(offset), 0),
+            "inode": inode,
+            "path": str(path),
+        }
+    )
+    for key, value in extra.items():
+        next_cursor[key] = value
+    return next_cursor
 
 
 def read_incremental_lines(
@@ -798,36 +1144,84 @@ def read_incremental_lines(
     startup_mode: str,
     bootstrap_tail_lines: int,
 ) -> tuple[list[str], dict[str, Any]]:
-    if not path.exists():
-        return [], {"offset": 0, "inode": None, "path": str(path)}
+    previous_cursor = dict(cursor or {})
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        missing_since = previous_cursor.get("missing_since") or utcnow().isoformat()
+        return [], build_log_cursor(
+            path,
+            int(previous_cursor.get("offset", 0)),
+            previous_cursor.get("inode"),
+            previous_cursor,
+            missing_since=missing_since,
+            status="missing",
+        )
+    except OSError:
+        return [], build_log_cursor(
+            path,
+            int(previous_cursor.get("offset", 0)),
+            previous_cursor.get("inode"),
+            previous_cursor,
+            status="stat_error",
+        )
 
-    inode = getattr(path.stat(), "st_ino", None)
-    if not cursor or cursor.get("path") != str(path):
-        if startup_mode == "full":
+    inode = getattr(stat, "st_ino", None)
+    previous_offset = max(int(previous_cursor.get("offset", 0)), 0)
+    previous_inode = previous_cursor.get("inode")
+
+    try:
+        if not previous_cursor or previous_cursor.get("path") != str(path):
+            if startup_mode == "full":
+                with path.open("r", encoding="utf-8", errors="replace") as handle:
+                    lines = handle.readlines()
+                    offset = handle.tell()
+            else:
+                lines = read_tail_lines(path, bootstrap_tail_lines)
+                with path.open("r", encoding="utf-8", errors="replace") as handle:
+                    handle.seek(0, 2)
+                    offset = handle.tell()
+            return lines, build_log_cursor(path, offset, inode, previous_cursor, status="ready", missing_since=None)
+
+        rotation_detected = previous_inode != inode or stat.st_size < previous_offset
+        if rotation_detected:
             with path.open("r", encoding="utf-8", errors="replace") as handle:
+                handle.seek(0)
                 lines = handle.readlines()
                 offset = handle.tell()
-        else:
-            lines = read_tail_lines(path, bootstrap_tail_lines)
-            with path.open("r", encoding="utf-8", errors="replace") as handle:
-                handle.seek(0, 2)
-                offset = handle.tell()
-        return lines, {"offset": offset, "inode": inode, "path": str(path)}
+            return lines, build_log_cursor(
+                path,
+                offset,
+                inode,
+                previous_cursor,
+                status="rotated",
+                rotated_at=utcnow().isoformat(),
+                missing_since=None,
+            )
 
-    previous_offset = int(cursor.get("offset", 0))
-    previous_inode = cursor.get("inode")
-    stat = path.stat()
-    if previous_inode != inode or stat.st_size < previous_offset:
         with path.open("r", encoding="utf-8", errors="replace") as handle:
+            handle.seek(previous_offset)
             lines = handle.readlines()
             offset = handle.tell()
-        return lines, {"offset": offset, "inode": inode, "path": str(path)}
-
-    with path.open("r", encoding="utf-8", errors="replace") as handle:
-        handle.seek(previous_offset)
-        lines = handle.readlines()
-        offset = handle.tell()
-    return lines, {"offset": offset, "inode": inode, "path": str(path)}
+        return lines, build_log_cursor(path, offset, inode, previous_cursor, status="ready", missing_since=None)
+    except FileNotFoundError:
+        missing_since = previous_cursor.get("missing_since") or utcnow().isoformat()
+        return [], build_log_cursor(
+            path,
+            previous_offset,
+            previous_inode,
+            previous_cursor,
+            missing_since=missing_since,
+            status="missing",
+        )
+    except OSError:
+        return [], build_log_cursor(
+            path,
+            previous_offset,
+            previous_inode,
+            previous_cursor,
+            status="read_error",
+        )
 
 
 def parse_access_timestamp(raw: str, default_timezone: dt.tzinfo) -> dt.datetime | None:
@@ -1085,16 +1479,26 @@ def prune_history(state: dict[str, Any], config: dict[str, Any], now: dt.datetim
     max_events = config["agent"]["max_buffer_events"]
     cutoff = now - dt.timedelta(minutes=retention_minutes)
 
-    for key in ("access_events", "error_events", "system_snapshots"):
-        items = state["history"].get(key, [])
-        trimmed = []
-        for item in items:
-            timestamp = parse_iso_ts(item.get("ts"))
-            if timestamp and timestamp >= cutoff:
-                trimmed.append(item)
-        if key != "system_snapshots" and len(trimmed) > max_events:
-            trimmed = trimmed[-max_events:]
-        state["history"][key] = trimmed
+    for site_state in state.get("sites", {}).values():
+        history = site_state.get("history", {}) if isinstance(site_state, dict) else {}
+        for key in ("access_events", "error_events"):
+            items = history.get(key, [])
+            trimmed = []
+            for item in items:
+                timestamp = parse_iso_ts(item.get("ts"))
+                if timestamp and timestamp >= cutoff:
+                    trimmed.append(item)
+            if len(trimmed) > max_events:
+                trimmed = trimmed[-max_events:]
+            history[key] = trimmed
+
+    system_history = state.setdefault("system_history", {}).setdefault("snapshots", [])
+    trimmed_system = []
+    for item in system_history:
+        timestamp = parse_iso_ts(item.get("ts"))
+        if timestamp and timestamp >= cutoff:
+            trimmed_system.append(item)
+    state["system_history"]["snapshots"] = trimmed_system
 
 
 def filter_window(
@@ -1379,6 +1783,7 @@ def collect_system_snapshot(
     disk_root: str,
     host_id: str,
     site: str,
+    collect_network_io: bool = True,
 ) -> dict[str, Any]:
     snapshot = {
         "event_type": "system_snapshot",
@@ -1394,17 +1799,22 @@ def collect_system_snapshot(
     cpu_pct = psutil.cpu_percent(interval=0.1)
     memory = psutil.virtual_memory()
     disk = psutil.disk_usage(disk_root)
-    net = psutil.net_io_counters()
     snapshot.update(
         {
             "cpu_pct": round(cpu_pct, 2),
             "memory_pct": round(memory.percent, 2),
             "disk_used_pct": round(disk.percent, 2),
             "disk_free_bytes": int(disk.free),
-            "net_rx_bytes": int(net.bytes_recv),
-            "net_tx_bytes": int(net.bytes_sent),
         }
     )
+    if collect_network_io:
+        net = psutil.net_io_counters()
+        snapshot.update(
+            {
+                "net_rx_bytes": int(net.bytes_recv),
+                "net_tx_bytes": int(net.bytes_sent),
+            }
+        )
     try:
         load_1m, load_5m, load_15m = psutil.getloadavg()
     except (AttributeError, OSError):
@@ -1665,6 +2075,608 @@ def deliver_alerts(
     return results
 
 
+def compact_json(data: dict[str, Any] | None) -> str | None:
+    if not data:
+        return None
+    return json.dumps(data, ensure_ascii=False, sort_keys=True)
+
+
+def truncate_text(value: str | None, limit: int = 2000) -> str:
+    text = str(value or "")
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def format_command_template(template: str, **kwargs: Any) -> str:
+    try:
+        return template.format(**kwargs)
+    except Exception:
+        return template
+
+
+def execute_guarded_command(command_text: str, timeout_seconds: int, dry_run: bool) -> dict[str, Any]:
+    if dry_run:
+        return {
+            "success": True,
+            "status": "dry-run",
+            "stdout": "",
+            "stderr": "",
+            "returncode": 0,
+            "command_text": command_text,
+        }
+    try:
+        completed = subprocess.run(
+            shlex.split(command_text),
+            capture_output=True,
+            text=True,
+            timeout=max(int(timeout_seconds), 1),
+            check=False,
+        )
+    except Exception as exc:
+        return {
+            "success": False,
+            "status": "failed",
+            "stdout": "",
+            "stderr": str(exc),
+            "returncode": None,
+            "command_text": command_text,
+        }
+    return {
+        "success": completed.returncode == 0,
+        "status": "success" if completed.returncode == 0 else "failed",
+        "stdout": completed.stdout,
+        "stderr": completed.stderr,
+        "returncode": completed.returncode,
+        "command_text": command_text,
+    }
+
+
+def record_automation_action(
+    connection: sqlite3.Connection,
+    host_id: str,
+    site: str,
+    action_type: str,
+    target: str | None,
+    reason: str,
+    status: str,
+    dry_run: bool,
+    command_text: str | None,
+    stdout: str | None = None,
+    stderr: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    created_at: dt.datetime | None = None,
+) -> None:
+    timestamp = (created_at or utcnow()).isoformat()
+    connection.execute(
+        """
+        INSERT INTO automation_actions (
+            host_id,
+            site,
+            action_type,
+            target,
+            reason,
+            status,
+            dry_run,
+            command_text,
+            stdout,
+            stderr,
+            metadata_json,
+            created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            host_id,
+            site,
+            action_type,
+            target,
+            reason,
+            status,
+            1 if dry_run else 0,
+            command_text,
+            truncate_text(stdout),
+            truncate_text(stderr),
+            compact_json(metadata),
+            timestamp,
+        ),
+    )
+
+
+def ip_is_whitelisted(ip_address: str, whitelist: list[str]) -> bool:
+    try:
+        ip_obj = ipaddress.ip_address(ip_address)
+    except ValueError:
+        return False
+    for item in whitelist:
+        candidate = str(item or "").strip()
+        if not candidate:
+            continue
+        try:
+            if "/" in candidate:
+                if ip_obj in ipaddress.ip_network(candidate, strict=False):
+                    return True
+            elif ip_obj == ipaddress.ip_address(candidate):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def ip_matches_whitelisted_spider(
+    events: list[dict[str, Any]],
+    ip_address: str,
+    window_start: dt.datetime,
+    window_end: dt.datetime,
+    whitelist_spiders: list[str],
+) -> bool:
+    allowed = {str(item or "").strip().lower() for item in whitelist_spiders if str(item or "").strip()}
+    if not allowed:
+        return False
+    for event in filter_window(events, window_start, window_end):
+        if str(event.get("client_ip") or "") != ip_address:
+            continue
+        spider = str(event.get("spider_family") or "").strip().lower()
+        if spider and spider in allowed:
+            return True
+    return False
+
+
+def active_ban_row(
+    connection: sqlite3.Connection,
+    host_id: str,
+    site: str,
+    ip_address: str,
+    now: dt.datetime,
+) -> tuple[Any, ...] | None:
+    return connection.execute(
+        """
+        SELECT id, dry_run, expires_at
+        FROM banned_ips
+        WHERE host_id = ?
+          AND site = ?
+          AND ip_address = ?
+          AND lifted_at IS NULL
+          AND expires_at > ?
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (host_id, site, ip_address, now.isoformat()),
+    ).fetchone()
+
+
+def active_ban_count(
+    connection: sqlite3.Connection,
+    host_id: str,
+    site: str,
+    now: dt.datetime,
+) -> int:
+    row = connection.execute(
+        """
+        SELECT COUNT(1)
+        FROM banned_ips
+        WHERE host_id = ?
+          AND site = ?
+          AND lifted_at IS NULL
+          AND expires_at > ?
+        """,
+        (host_id, site, now.isoformat()),
+    ).fetchone()
+    return int(row[0] or 0) if row else 0
+
+
+def recent_automation_action(
+    connection: sqlite3.Connection,
+    host_id: str,
+    site: str,
+    action_type: str,
+    target: str | None,
+    now: dt.datetime,
+    cooldown_seconds: int,
+) -> tuple[Any, ...] | None:
+    if cooldown_seconds <= 0:
+        return None
+    cutoff = (now - dt.timedelta(seconds=cooldown_seconds)).isoformat()
+    if target:
+        return connection.execute(
+            """
+            SELECT id, created_at, status
+            FROM automation_actions
+            WHERE host_id = ?
+              AND site = ?
+              AND action_type = ?
+              AND target = ?
+              AND created_at >= ?
+              AND status IN ('success', 'dry-run')
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (host_id, site, action_type, target, cutoff),
+        ).fetchone()
+    return connection.execute(
+        """
+        SELECT id, created_at, status
+        FROM automation_actions
+        WHERE host_id = ?
+          AND site = ?
+          AND action_type = ?
+          AND created_at >= ?
+          AND status IN ('success', 'dry-run')
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (host_id, site, action_type, cutoff),
+    ).fetchone()
+
+
+def render_automation_notice(config: dict[str, Any], action: dict[str, Any]) -> tuple[str, str]:
+    site = str(action.get("site") or config.get("agent", {}).get("site") or "-")
+    title = f"⚠️ 自动化干预通知 | {site} | {action.get('action_type', 'automation')}"
+    lines = [
+        f"# {title}",
+        "",
+        f"- 主机: `{config['agent']['host_id']}`",
+        f"- 站点: `{site}`",
+        f"- 动作: `{action.get('action_type', '-')}`",
+        f"- 触发原因: {action.get('reason', '-')}",
+        f"- 目标: `{action.get('target', '-')}`",
+        f"- 状态: `{action.get('status', '-')}`",
+        f"- Dry-Run: `{str(bool(action.get('dry_run', False))).lower()}`",
+    ]
+    if action.get("command_text"):
+        lines.append(f"- 命令: `{action['command_text']}`")
+    if action.get("stdout"):
+        lines.append(f"- stdout: `{truncate_text(action['stdout'], 300)}`")
+    if action.get("stderr"):
+        lines.append(f"- stderr: `{truncate_text(action['stderr'], 300)}`")
+    return title, "\n".join(lines)
+
+
+def send_automation_notice(
+    config: dict[str, Any],
+    channels: list[str],
+    action: dict[str, Any],
+) -> list[dict[str, Any]]:
+    title, markdown = render_automation_notice(config, action)
+    return send_markdown_message(config, title, markdown, channels)
+
+
+def release_expired_bans(
+    connection: sqlite3.Connection,
+    config: dict[str, Any],
+    now: dt.datetime,
+) -> list[dict[str, Any]]:
+    automation = config.get("automation", {})
+    auto_ban = automation.get("auto_ban", {})
+    rows = connection.execute(
+        """
+        SELECT id, site, ip_address, reason, dry_run, unban_command_text
+        FROM banned_ips
+        WHERE host_id = ?
+          AND lifted_at IS NULL
+          AND expires_at <= ?
+        ORDER BY expires_at ASC
+        """,
+        (config["agent"]["host_id"], now.isoformat()),
+    ).fetchall()
+    results: list[dict[str, Any]] = []
+    for row in rows:
+        site = str(row[1])
+        ip_address = str(row[2])
+        row_dry_run = bool(row[4])
+        command_text = str(row[5] or "").strip() or format_command_template(
+            str(auto_ban.get("unban_command_template") or ""),
+            ip=ip_address,
+            site=site,
+            host_id=config["agent"]["host_id"],
+        )
+        dry_run = bool(automation.get("dry_run", True) or row_dry_run)
+        execution = execute_guarded_command(command_text, int(auto_ban.get("timeout_seconds", 15)), dry_run)
+        connection.execute(
+            """
+            UPDATE banned_ips
+            SET lifted_at = ?, lift_status = ?, unban_command_text = ?
+            WHERE id = ?
+            """,
+            (now.isoformat(), execution["status"], command_text, int(row[0])),
+        )
+        action = {
+            "host_id": config["agent"]["host_id"],
+            "site": site,
+            "action_type": "auto_unban",
+            "target": ip_address,
+            "reason": f"ban ttl expired ({row[3]})",
+            "status": execution["status"],
+            "dry_run": dry_run,
+            "command_text": command_text,
+            "stdout": execution.get("stdout"),
+            "stderr": execution.get("stderr"),
+        }
+        record_automation_action(
+            connection,
+            config["agent"]["host_id"],
+            site,
+            "auto_unban",
+            ip_address,
+            action["reason"],
+            execution["status"],
+            dry_run,
+            command_text,
+            execution.get("stdout"),
+            execution.get("stderr"),
+        )
+        site_config = build_site_runtime_config(config, find_site(config, site) or {"domain": site, "site_host": site})
+        action["notifications"] = send_automation_notice(site_config, auto_ban.get("channels", []), action)
+        results.append(action)
+    if rows:
+        connection.commit()
+    return results
+
+
+def handle_auto_ban(
+    connection: sqlite3.Connection,
+    config: dict[str, Any],
+    site_state: dict[str, Any],
+    now: dt.datetime,
+    window_start: dt.datetime,
+    access_summary: dict[str, Any],
+    alerts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    automation = config.get("automation", {})
+    auto_ban = automation.get("auto_ban", {})
+    if not auto_ban.get("enabled", False):
+        return []
+
+    suspicious_alert = next((alert for alert in alerts if alert.get("kind") == "suspicious_ip_burst"), None)
+    if not suspicious_alert:
+        return []
+
+    host_id = config["agent"]["host_id"]
+    site = config["agent"]["site"]
+    ip_address = str(suspicious_alert.get("top_ip") or "").strip()
+    reason = f"suspicious request burst ({suspicious_alert.get('top_rpm', 0)} req/min)"
+    dry_run = bool(automation.get("dry_run", True))
+    actions: list[dict[str, Any]] = []
+
+    action = {
+        "host_id": host_id,
+        "site": site,
+        "action_type": "auto_ban",
+        "target": ip_address or "-",
+        "reason": reason,
+        "dry_run": dry_run,
+    }
+
+    if not ip_address:
+        action["status"] = "skipped"
+        action["stderr"] = "missing target ip"
+    elif ip_is_whitelisted(ip_address, list(auto_ban.get("whitelist_ips", []))):
+        action["status"] = "skipped"
+        action["stderr"] = "ip matched whitelist"
+    elif ip_matches_whitelisted_spider(
+        site_state.get("history", {}).get("access_events", []),
+        ip_address,
+        window_start,
+        now,
+        list(auto_ban.get("whitelist_spiders", [])),
+    ):
+        action["status"] = "skipped"
+        action["stderr"] = "ip matched spider whitelist"
+    elif active_ban_row(connection, host_id, site, ip_address, now):
+        action["status"] = "skipped"
+        action["stderr"] = "active ban already exists"
+    elif active_ban_count(connection, host_id, site, now) >= int(auto_ban.get("max_active_bans", 200)):
+        action["status"] = "skipped"
+        action["stderr"] = "active ban limit reached"
+    else:
+        command_text = format_command_template(
+            str(auto_ban.get("command_template") or ""),
+            ip=ip_address,
+            site=site,
+            host_id=host_id,
+        )
+        execution = execute_guarded_command(command_text, int(auto_ban.get("timeout_seconds", 15)), dry_run)
+        if execution["status"] in {"success", "dry-run"}:
+            expires_at = now + dt.timedelta(seconds=int(auto_ban.get("ban_ttl_seconds", 86400)))
+            connection.execute(
+                """
+                INSERT INTO banned_ips (
+                    host_id,
+                    site,
+                    ip_address,
+                    reason,
+                    command_text,
+                    dry_run,
+                    created_at,
+                    expires_at,
+                    unban_command_text
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    host_id,
+                    site,
+                    ip_address,
+                    reason,
+                    command_text,
+                    1 if dry_run else 0,
+                    now.isoformat(),
+                    expires_at.isoformat(),
+                    format_command_template(
+                        str(auto_ban.get("unban_command_template") or ""),
+                        ip=ip_address,
+                        site=site,
+                        host_id=host_id,
+                    ),
+                ),
+            )
+        action.update(
+            {
+                "status": execution["status"],
+                "command_text": command_text,
+                "stdout": execution.get("stdout"),
+                "stderr": execution.get("stderr"),
+            }
+        )
+
+    record_automation_action(
+        connection,
+        host_id,
+        site,
+        "auto_ban",
+        ip_address or None,
+        reason,
+        str(action.get("status") or "skipped"),
+        dry_run,
+        action.get("command_text"),
+        action.get("stdout"),
+        action.get("stderr"),
+        {
+            "top_rpm": suspicious_alert.get("top_rpm"),
+            "top_uri": access_summary.get("top_uris", [{}])[0].get("uri") if access_summary.get("top_uris") else None,
+        },
+        created_at=now,
+    )
+    action["notifications"] = send_automation_notice(config, auto_ban.get("channels", []), action)
+    connection.commit()
+    actions.append(action)
+    return actions
+
+
+def handle_auto_heal(
+    connection: sqlite3.Connection,
+    config: dict[str, Any],
+    now: dt.datetime,
+    access_summary: dict[str, Any],
+    error_summary: dict[str, Any],
+    alerts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    automation = config.get("automation", {})
+    auto_heal = automation.get("auto_heal", {})
+    if not auto_heal.get("enabled", False):
+        return []
+
+    trigger_kinds = {str(item or "").strip().lower() for item in auto_heal.get("trigger_kinds", [])}
+    matched_alert = next(
+        (alert for alert in alerts if str(alert.get("kind") or "").strip().lower() in trigger_kinds),
+        None,
+    )
+    if not matched_alert:
+        return []
+
+    host_id = config["agent"]["host_id"]
+    site = config["agent"]["site"]
+    dry_run = bool(automation.get("dry_run", True))
+    actions: list[dict[str, Any]] = []
+    reason = f"matched alert {matched_alert.get('kind')} with 5xx pressure"
+    top_error = (
+        error_summary.get("top_fingerprints", [{}])[0].get("fingerprint")
+        if error_summary.get("top_fingerprints")
+        else None
+    )
+
+    for service in auto_heal.get("services", []):
+        service_name = str(service or "").strip()
+        if not service_name:
+            continue
+        recent = recent_automation_action(
+            connection,
+            host_id,
+            site,
+            "auto_heal",
+            service_name,
+            now,
+            int(auto_heal.get("cooldown_seconds", 3600)),
+        )
+        action = {
+            "host_id": host_id,
+            "site": site,
+            "action_type": "auto_heal",
+            "target": service_name,
+            "reason": reason,
+            "dry_run": dry_run,
+        }
+        if recent:
+            action["status"] = "skipped"
+            action["stderr"] = "cooldown active"
+        else:
+            command_text = format_command_template(
+                str(auto_heal.get("command_template") or ""),
+                service=service_name,
+                site=site,
+                host_id=host_id,
+            )
+            execution = execute_guarded_command(command_text, int(auto_heal.get("timeout_seconds", 30)), dry_run)
+            action.update(
+                {
+                    "status": execution["status"],
+                    "command_text": command_text,
+                    "stdout": execution.get("stdout"),
+                    "stderr": execution.get("stderr"),
+                }
+            )
+        record_automation_action(
+            connection,
+            host_id,
+            site,
+            "auto_heal",
+            service_name,
+            reason,
+            str(action.get("status") or "skipped"),
+            dry_run,
+            action.get("command_text"),
+            action.get("stdout"),
+            action.get("stderr"),
+            {
+                "alert_kind": matched_alert.get("kind"),
+                "http_5xx": sum(
+                    count
+                    for code, count in access_summary.get("status_codes", {}).items()
+                    if code in {"500", "502", "504"}
+                ),
+                "top_error": top_error,
+            },
+            created_at=now,
+        )
+        action["notifications"] = send_automation_notice(config, auto_heal.get("channels", []), action)
+        actions.append(action)
+    connection.commit()
+    return actions
+
+
+def run_guarded_automation(
+    connection: sqlite3.Connection,
+    config: dict[str, Any],
+    site_state: dict[str, Any],
+    now: dt.datetime,
+    window_start: dt.datetime,
+    access_summary: dict[str, Any],
+    error_summary: dict[str, Any],
+    alerts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    actions.extend(
+        handle_auto_ban(
+            connection,
+            config,
+            site_state,
+            now,
+            window_start,
+            access_summary,
+            alerts,
+        )
+    )
+    actions.extend(
+        handle_auto_heal(
+            connection,
+            config,
+            now,
+            access_summary,
+            error_summary,
+            alerts,
+        )
+    )
+    return actions
+
+
 def floor_bucket(timestamp: dt.datetime, bucket_minutes: int, timezone: dt.tzinfo) -> dt.datetime:
     local_timestamp = timestamp.astimezone(timezone)
     minute = (local_timestamp.minute // bucket_minutes) * bucket_minutes
@@ -1871,145 +2883,238 @@ def rewrite_rollup_details(
         )
 
 
+def empty_access_summary() -> dict[str, Any]:
+    return {
+        "total_requests": 0,
+        "pv": 0,
+        "uv": 0,
+        "unique_ips": 0,
+        "active_users_10m": 0,
+        "qps": 0.0,
+        "avg_response_ms": None,
+        "slow_request_count": 0,
+        "bandwidth_out_bytes": 0,
+        "bandwidth_in_bytes": None,
+        "status_codes": {},
+        "spiders": [],
+        "top_uris": [],
+        "uri_stats": [],
+        "source_stats": [],
+        "visitor_hashes": [],
+        "client_ips": [],
+        "client_ip_stats": [],
+        "client_families": [],
+        "slow_request_top_uris": [],
+        "suspicious_ips": [],
+    }
+
+
+def empty_error_summary() -> dict[str, Any]:
+    return {
+        "total_errors": 0,
+        "categories": {},
+        "top_fingerprints": [],
+    }
+
+
+def empty_system_summary() -> dict[str, Any]:
+    return {
+        "avg_cpu_pct": None,
+        "max_cpu_pct": None,
+        "avg_memory_pct": None,
+        "max_memory_pct": None,
+        "min_disk_free_bytes": None,
+    }
+
+
+def upsert_metric_rollup(
+    connection: sqlite3.Connection,
+    host_id: str,
+    site: str,
+    bucket_start_local: str,
+    bucket_end_local: str,
+    bucket_minutes: int,
+    access_summary: dict[str, Any],
+    error_summary: dict[str, Any],
+    system_summary: dict[str, Any],
+) -> int:
+    connection.execute(
+        """
+        INSERT INTO metric_rollups (
+            host_id,
+            site,
+            bucket_start,
+            bucket_end,
+            bucket_minutes,
+            request_count,
+            pv,
+            uv,
+            unique_ips,
+            active_users,
+            qps,
+            avg_response_ms,
+            slow_request_count,
+            bandwidth_out_bytes,
+            bandwidth_in_bytes,
+            total_errors,
+            avg_cpu_pct,
+            max_cpu_pct,
+            avg_memory_pct,
+            max_memory_pct,
+            min_disk_free_bytes,
+            updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(host_id, site, bucket_start, bucket_minutes)
+        DO UPDATE SET
+            bucket_end = excluded.bucket_end,
+            request_count = excluded.request_count,
+            pv = excluded.pv,
+            uv = excluded.uv,
+            unique_ips = excluded.unique_ips,
+            active_users = excluded.active_users,
+            qps = excluded.qps,
+            avg_response_ms = excluded.avg_response_ms,
+            slow_request_count = excluded.slow_request_count,
+            bandwidth_out_bytes = excluded.bandwidth_out_bytes,
+            bandwidth_in_bytes = excluded.bandwidth_in_bytes,
+            total_errors = excluded.total_errors,
+            avg_cpu_pct = excluded.avg_cpu_pct,
+            max_cpu_pct = excluded.max_cpu_pct,
+            avg_memory_pct = excluded.avg_memory_pct,
+            max_memory_pct = excluded.max_memory_pct,
+            min_disk_free_bytes = excluded.min_disk_free_bytes,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (
+            host_id,
+            site,
+            bucket_start_local,
+            bucket_end_local,
+            bucket_minutes,
+            access_summary["total_requests"],
+            access_summary["pv"],
+            access_summary["uv"],
+            access_summary["unique_ips"],
+            access_summary["active_users_10m"],
+            access_summary["qps"],
+            access_summary["avg_response_ms"],
+            access_summary["slow_request_count"],
+            access_summary["bandwidth_out_bytes"],
+            access_summary["bandwidth_in_bytes"],
+            error_summary["total_errors"],
+            system_summary["avg_cpu_pct"],
+            system_summary["max_cpu_pct"],
+            system_summary["avg_memory_pct"],
+            system_summary["max_memory_pct"],
+            system_summary["min_disk_free_bytes"],
+        ),
+    )
+    row = connection.execute(
+        """
+        SELECT id
+        FROM metric_rollups
+        WHERE host_id = ?
+          AND site = ?
+          AND bucket_start = ?
+          AND bucket_minutes = ?
+        """,
+        (host_id, site, bucket_start_local, bucket_minutes),
+    ).fetchone()
+    return int(row[0])
+
+
 def persist_rollups(
     connection: sqlite3.Connection,
     config: dict[str, Any],
     state: dict[str, Any],
     now: dt.datetime,
-) -> int:
+) -> dict[str, int]:
     host_id = config["agent"]["host_id"]
-    site = config["agent"]["site"]
     thresholds = config["thresholds"]
     timezone = get_timezone(config)
-    access_events = state["history"]["access_events"]
-    error_events = state["history"]["error_events"]
-    system_snapshots = state["history"]["system_snapshots"]
-
-    timestamps = []
-    for item in access_events + error_events + system_snapshots:
+    system_snapshots = state.get("system_history", {}).get("snapshots", [])
+    system_timestamps = []
+    for item in system_snapshots:
         timestamp = event_timestamp(item)
         if timestamp is not None:
-            timestamps.append(timestamp)
+            system_timestamps.append(timestamp)
 
-    upserts = 0
+    upserts: dict[str, int] = {}
+    zero_access = empty_access_summary()
+    zero_error = empty_error_summary()
+    zero_system = empty_system_summary()
     for bucket_minutes in config["storage"]["rollup_minutes"]:
-        for bucket_start, bucket_end in iter_closed_buckets(
-            timestamps,
-            now,
-            bucket_minutes,
-            timezone,
-        ):
-            access_summary = summarize_access_window(
-                access_events,
-                bucket_start,
-                bucket_end,
-                thresholds["slow_ms"],
-                thresholds["attack_rpm_threshold"],
-            )
-            error_summary = summarize_errors_window(
-                error_events,
-                bucket_start,
-                bucket_end,
-            )
+        for bucket_start, bucket_end in iter_closed_buckets(system_timestamps, now, bucket_minutes, timezone):
             system_summary = summarize_system_snapshots_window(
                 system_snapshots,
                 bucket_start,
                 bucket_end,
             )
-            if (
-                access_summary["total_requests"] == 0
-                and error_summary["total_errors"] == 0
-                and system_summary["avg_cpu_pct"] is None
-            ):
+            if system_summary["avg_cpu_pct"] is None:
                 continue
 
             bucket_start_local = bucket_start.astimezone(timezone).isoformat()
             bucket_end_local = bucket_end.astimezone(timezone).isoformat()
-            connection.execute(
-                """
-                INSERT INTO metric_rollups (
-                    host_id,
-                    site,
+            upsert_metric_rollup(
+                connection,
+                host_id,
+                HOST_METRIC_SITE,
+                bucket_start_local,
+                bucket_end_local,
+                bucket_minutes,
+                zero_access,
+                zero_error,
+                system_summary,
+            )
+            upserts[HOST_METRIC_SITE] = upserts.get(HOST_METRIC_SITE, 0) + 1
+
+        for site in resolve_sites(config):
+            domain = str(site.get("domain") or "default")
+            site_state = ensure_site_state(state, domain)
+            access_events = site_state.get("history", {}).get("access_events", [])
+            error_events = site_state.get("history", {}).get("error_events", [])
+            timestamps = []
+            for item in access_events + error_events:
+                timestamp = event_timestamp(item)
+                if timestamp is not None:
+                    timestamps.append(timestamp)
+
+            for bucket_start, bucket_end in iter_closed_buckets(
+                timestamps,
+                now,
+                bucket_minutes,
+                timezone,
+            ):
+                access_summary = summarize_access_window(
+                    access_events,
                     bucket_start,
                     bucket_end,
-                    bucket_minutes,
-                    request_count,
-                    pv,
-                    uv,
-                    unique_ips,
-                    active_users,
-                    qps,
-                    avg_response_ms,
-                    slow_request_count,
-                    bandwidth_out_bytes,
-                    bandwidth_in_bytes,
-                    total_errors,
-                    avg_cpu_pct,
-                    max_cpu_pct,
-                    avg_memory_pct,
-                    max_memory_pct,
-                    min_disk_free_bytes,
-                    updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                ON CONFLICT(host_id, site, bucket_start, bucket_minutes)
-                DO UPDATE SET
-                    bucket_end = excluded.bucket_end,
-                    request_count = excluded.request_count,
-                    pv = excluded.pv,
-                    uv = excluded.uv,
-                    unique_ips = excluded.unique_ips,
-                    active_users = excluded.active_users,
-                    qps = excluded.qps,
-                    avg_response_ms = excluded.avg_response_ms,
-                    slow_request_count = excluded.slow_request_count,
-                    bandwidth_out_bytes = excluded.bandwidth_out_bytes,
-                    bandwidth_in_bytes = excluded.bandwidth_in_bytes,
-                    total_errors = excluded.total_errors,
-                    avg_cpu_pct = excluded.avg_cpu_pct,
-                    max_cpu_pct = excluded.max_cpu_pct,
-                    avg_memory_pct = excluded.avg_memory_pct,
-                    max_memory_pct = excluded.max_memory_pct,
-                    min_disk_free_bytes = excluded.min_disk_free_bytes,
-                    updated_at = CURRENT_TIMESTAMP
-                """,
-                (
+                    thresholds["slow_ms"],
+                    thresholds["attack_rpm_threshold"],
+                )
+                error_summary = summarize_errors_window(
+                    error_events,
+                    bucket_start,
+                    bucket_end,
+                )
+                if access_summary["total_requests"] == 0 and error_summary["total_errors"] == 0:
+                    continue
+
+                bucket_start_local = bucket_start.astimezone(timezone).isoformat()
+                bucket_end_local = bucket_end.astimezone(timezone).isoformat()
+                rollup_id = upsert_metric_rollup(
+                    connection,
                     host_id,
-                    site,
+                    domain,
                     bucket_start_local,
                     bucket_end_local,
                     bucket_minutes,
-                    access_summary["total_requests"],
-                    access_summary["pv"],
-                    access_summary["uv"],
-                    access_summary["unique_ips"],
-                    access_summary["active_users_10m"],
-                    access_summary["qps"],
-                    access_summary["avg_response_ms"],
-                    access_summary["slow_request_count"],
-                    access_summary["bandwidth_out_bytes"],
-                    access_summary["bandwidth_in_bytes"],
-                    error_summary["total_errors"],
-                    system_summary["avg_cpu_pct"],
-                    system_summary["max_cpu_pct"],
-                    system_summary["avg_memory_pct"],
-                    system_summary["max_memory_pct"],
-                    system_summary["min_disk_free_bytes"],
-                ),
-            )
-
-            rollup_id = connection.execute(
-                """
-                SELECT id
-                FROM metric_rollups
-                WHERE host_id = ?
-                  AND site = ?
-                  AND bucket_start = ?
-                  AND bucket_minutes = ?
-                """,
-                (host_id, site, bucket_start_local, bucket_minutes),
-            ).fetchone()[0]
-            rewrite_rollup_details(connection, rollup_id, access_summary, error_summary)
-            upserts += 1
+                    access_summary,
+                    error_summary,
+                    zero_system,
+                )
+                rewrite_rollup_details(connection, rollup_id, access_summary, error_summary)
+                upserts[domain] = upserts.get(domain, 0) + 1
 
     connection.commit()
     return upserts
@@ -2064,143 +3169,217 @@ def run_cycle(
     mode: str,
 ) -> dict[str, Any]:
     run_started_at = utcnow()
+    now = run_started_at
     host_id = config["agent"]["host_id"]
-    site = config["agent"]["site"]
-    site_host = config["agent"]["site_host"]
     thresholds = config["thresholds"]
-    timezone = get_timezone(config)
-
-    access_path = Path(config["logs"]["access_log"])
-    error_path = Path(config["logs"]["error_log"])
     state_file = Path(config["agent"]["state_file"])
     database_file = Path(config["storage"]["database_file"])
+    timezone = get_timezone(config)
+    sites = resolve_sites(config)
+    expired_unbans = release_expired_bans(connection, config, now)
 
-    access_lines, access_cursor = read_incremental_lines(
-        access_path,
-        state["cursors"].get("access_log"),
-        config["agent"]["startup_mode"],
-        config["agent"]["bootstrap_tail_lines"],
-    )
-    error_lines, error_cursor = read_incremental_lines(
-        error_path,
-        state["cursors"].get("error_log"),
-        config["agent"]["startup_mode"],
-        config["agent"]["bootstrap_tail_lines"],
-    )
-    state["cursors"]["access_log"] = access_cursor
-    state["cursors"]["error_log"] = error_cursor
+    system_metrics = config.get("system_metrics", {})
+    if system_metrics.get("enabled", True):
+        system_snapshot = collect_system_snapshot(
+            str(system_metrics.get("disk_root") or "/"),
+            host_id,
+            HOST_METRIC_SITE,
+            bool(system_metrics.get("collect_network_io", True)),
+        )
+    else:
+        system_snapshot = {
+            "event_type": "system_snapshot",
+            "host_id": host_id,
+            "site": HOST_METRIC_SITE,
+            "ts": utcnow().isoformat(),
+            "metrics_available": False,
+            "disabled": True,
+        }
 
-    access_events = []
-    dropped_access = 0
-    for line in access_lines:
-        event = parse_access_line(line, host_id, site, site_host, timezone)
-        if event is None:
-            dropped_access += 1
-            continue
-        access_events.append(event)
+    if system_metrics.get("enabled", True):
+        state.setdefault("system_history", {}).setdefault("snapshots", []).append(
+            serialize_events([system_snapshot])[0]
+        )
 
-    error_events = []
-    dropped_errors = 0
-    for line in error_lines:
-        event = parse_error_line(line, host_id, site, timezone)
-        if event is None:
-            dropped_errors += 1
-            continue
-        error_events.append(event)
+    site_results: dict[str, dict[str, Any]] = {}
+    collected_events: dict[str, dict[str, list[dict[str, Any]]]] = {}
 
-    system_snapshot = collect_system_snapshot(
-        config["agent"]["disk_root"],
-        host_id,
-        site,
-    )
+    for site in sites:
+        domain = str(site.get("domain") or "default")
+        site_config = build_site_runtime_config(config, site)
+        site_state = ensure_site_state(state, domain)
+        access_path = Path(site_config["logs"]["access_log"])
+        error_path = Path(site_config["logs"]["error_log"])
 
-    state["history"]["access_events"].extend(serialize_events(access_events))
-    state["history"]["error_events"].extend(serialize_events(error_events))
-    state["history"]["system_snapshots"].append(serialize_events([system_snapshot])[0])
+        access_lines, access_cursor = read_incremental_lines(
+            access_path,
+            site_state["cursors"].get("access_log"),
+            config["agent"]["startup_mode"],
+            config["agent"]["bootstrap_tail_lines"],
+        )
+        error_lines, error_cursor = read_incremental_lines(
+            error_path,
+            site_state["cursors"].get("error_log"),
+            config["agent"]["startup_mode"],
+            config["agent"]["bootstrap_tail_lines"],
+        )
+        site_state["cursors"]["access_log"] = access_cursor
+        site_state["cursors"]["error_log"] = error_cursor
 
-    now = utcnow()
+        access_events: list[dict[str, Any]] = []
+        dropped_access = 0
+        for line in access_lines:
+            event = parse_access_line(
+                line,
+                host_id,
+                domain,
+                str(site.get("site_host") or domain),
+                timezone,
+            )
+            if event is None:
+                dropped_access += 1
+                continue
+            access_events.append(event)
+
+        error_events: list[dict[str, Any]] = []
+        dropped_errors = 0
+        for line in error_lines:
+            event = parse_error_line(line, host_id, domain, timezone)
+            if event is None:
+                dropped_errors += 1
+                continue
+            error_events.append(event)
+
+        site_state["history"]["access_events"].extend(serialize_events(access_events))
+        site_state["history"]["error_events"].extend(serialize_events(error_events))
+        collected_events[domain] = {
+            "access_events": serialize_events(access_events),
+            "error_events": serialize_events(error_events),
+        }
+        site_results[domain] = {
+            "site": domain,
+            "site_host": str(site.get("site_host") or domain),
+            "access_log": str(access_path),
+            "error_log": str(error_path),
+            "parser_stats": {
+                "access_lines_read": len(access_lines),
+                "access_lines_dropped": dropped_access,
+                "error_lines_read": len(error_lines),
+                "error_lines_dropped": dropped_errors,
+            },
+            "cursors": {
+                "access_log": access_cursor,
+                "error_log": error_cursor,
+            },
+            "_site_config": site_config,
+        }
+
     prune_history(state, config, now)
     save_state(state_file, state)
 
-    summary_window_start = now - dt.timedelta(
-        minutes=thresholds["summary_window_minutes"]
-    )
-    access_summary = summarize_access_window(
-        state["history"]["access_events"],
-        summary_window_start,
-        now,
-        thresholds["slow_ms"],
-        thresholds["attack_rpm_threshold"],
-    )
-    error_summary = summarize_errors_window(
-        state["history"]["error_events"],
-        summary_window_start,
-        now,
-    )
-    alerts = evaluate_alerts(system_snapshot, access_summary, error_summary, thresholds)
-    alert_deliveries = deliver_alerts(
-        config,
-        state,
-        now,
-        alerts,
-        system_snapshot,
-        access_summary,
-        error_summary,
-    )
-    save_state(state_file, state)
+    summary_window_start = now - dt.timedelta(minutes=thresholds["summary_window_minutes"])
+    for domain, site_result in site_results.items():
+        site_config = site_result.pop("_site_config")
+        site_state = ensure_site_state(state, domain)
+        access_summary = summarize_access_window(
+            site_state["history"]["access_events"],
+            summary_window_start,
+            now,
+            thresholds["slow_ms"],
+            thresholds["attack_rpm_threshold"],
+        )
+        error_summary = summarize_errors_window(
+            site_state["history"]["error_events"],
+            summary_window_start,
+            now,
+        )
+        alerts = evaluate_alerts(system_snapshot, access_summary, error_summary, thresholds)
+        alert_deliveries = deliver_alerts(
+            site_config,
+            state,
+            now,
+            alerts,
+            system_snapshot,
+            access_summary,
+            error_summary,
+        )
+        site_result["traffic"] = access_summary
+        site_result["errors"] = error_summary
+        site_result["alerts"] = alerts
+        site_result["notifications"] = {
+            "alert_deliveries": alert_deliveries,
+        }
+        automation_actions = run_guarded_automation(
+            connection,
+            site_config,
+            site_state,
+            now,
+            summary_window_start,
+            access_summary,
+            error_summary,
+            alerts,
+        )
+        site_result["automation"] = {
+            "actions": automation_actions,
+        }
+        site_result["storage"] = {
+            "history_access_events": len(site_state["history"]["access_events"]),
+            "history_error_events": len(site_state["history"]["error_events"]),
+        }
+        if config["agent"]["emit_events"]:
+            site_result["access_events"] = collected_events.get(domain, {}).get("access_events", [])
+            site_result["error_events"] = collected_events.get(domain, {}).get("error_events", [])
 
-    parser_stats = {
-        "access_lines_read": len(access_lines),
-        "access_lines_dropped": dropped_access,
-        "error_lines_read": len(error_lines),
-        "error_lines_dropped": dropped_errors,
-    }
+    save_state(state_file, state)
     rollups_upserted = persist_rollups(connection, config, state, now)
     run_finished_at = utcnow()
-    record_run(
-        connection,
-        config,
-        run_started_at,
-        run_finished_at,
-        parser_stats,
-        rollups_upserted,
-        mode,
-    )
+
+    total_parser_stats = {
+        "access_lines_read": sum(item["parser_stats"]["access_lines_read"] for item in site_results.values()),
+        "access_lines_dropped": sum(item["parser_stats"]["access_lines_dropped"] for item in site_results.values()),
+        "error_lines_read": sum(item["parser_stats"]["error_lines_read"] for item in site_results.values()),
+        "error_lines_dropped": sum(item["parser_stats"]["error_lines_dropped"] for item in site_results.values()),
+    }
+
+    for domain, site_result in site_results.items():
+        site_config = build_site_runtime_config(config, find_site(config, domain) or {"domain": domain})
+        record_run(
+            connection,
+            site_config,
+            run_started_at,
+            run_finished_at,
+            site_result["parser_stats"],
+            int(rollups_upserted.get(domain, 0)),
+            mode,
+        )
+        site_result["storage"]["rollups_upserted"] = int(rollups_upserted.get(domain, 0))
 
     payload = {
         "meta": {
             "host_id": host_id,
-            "site": site,
             "generated_at": now.isoformat(),
             "config_path": str(config_path),
             "config_generated": config_generated,
             "mode": mode,
-            "access_log": str(access_path),
-            "error_log": str(error_path),
             "state_file": str(state_file),
             "database_file": str(database_file),
             "summary_window_minutes": thresholds["summary_window_minutes"],
             "rollup_minutes": config["storage"]["rollup_minutes"],
+            "site_count": len(sites),
+            "sites": [site["domain"] for site in sites],
         },
         "system_snapshot": system_snapshot,
-        "traffic": access_summary,
-        "errors": error_summary,
-        "alerts": alerts,
-        "notifications": {
-            "alert_deliveries": alert_deliveries,
-        },
-        "parser_stats": parser_stats,
+        "sites": site_results,
+        "parser_stats": total_parser_stats,
         "storage": {
             "rollups_upserted": rollups_upserted,
-            "history_access_events": len(state["history"]["access_events"]),
-            "history_error_events": len(state["history"]["error_events"]),
-            "history_system_snapshots": len(state["history"]["system_snapshots"]),
+            "history_system_snapshots": len(state.get("system_history", {}).get("snapshots", [])),
+        },
+        "automation": {
+            "expired_unbans": expired_unbans,
+            "dry_run": bool(config.get("automation", {}).get("dry_run", True)),
         },
     }
-
-    if config["agent"]["emit_events"]:
-        payload["access_events"] = serialize_events(access_events)
-        payload["error_events"] = serialize_events(error_events)
     return payload
 
 
@@ -2264,7 +3443,7 @@ def run_daemon(
                 "meta": {
                     "mode": "daemon",
                     "host_id": config["agent"]["host_id"],
-                    "site": config["agent"]["site"],
+                    "site": "*",
                     "generated_at": utcnow().isoformat(),
                     "cycle_status": "failed",
                 },
@@ -2296,7 +3475,7 @@ def main() -> int:
 
     state_file = Path(config["agent"]["state_file"])
     database_file = Path(config["storage"]["database_file"])
-    state = load_state(state_file)
+    state = migrate_state_shape(load_state(state_file), config)
     connection = init_database(database_file)
     try:
         if mode == "daemon":

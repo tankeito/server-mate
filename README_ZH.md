@@ -5,6 +5,8 @@
 # 🖥️ Server-Mate | 轻量级服务器监控与 AI 运维
 
 > 专为运行 Nginx 或 Apache 的 Linux 主机设计的双平面监控系统。
+>
+> 版本：`1.1.0`
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Platform-CentOS%2FUbuntu%2FDebian-lightgrey.svg)](https://linux.org)
@@ -42,6 +44,38 @@
 
 ---
 
+## 🆕 v1.1.0 新功能
+
+### 多站点监控
+
+- **矩阵配置**：通过 `sites[]` 数组在同一主机上监控多个域名
+- **系统指标**：专用的 `system_metrics` 部分用于宿主机全局资源（CPU、内存、磁盘、网络）
+- **作用域分离**：宿主机全局指标与单站点流量聚合通过 `__host__` 作用域分离
+
+### 加固的日志读取
+
+- **日志轮转支持**：处理 inode 变化、文件截断和临时文件缺失
+- **增量读取**：在日志轮转和重启之间稳健的状态追踪
+
+### Guarded Automation（安全自动化）
+
+- **干跑模式**：在启用真实操作前测试自动化策略
+- **白名单感知自动封禁**：保护可信 IP 和已知蜘蛛（Googlebot、Bingbot、Baiduspider）
+- **基于 TTL 的自动解封**：在可配置的 TTL 后自动解封（默认：24 小时）
+- **冷却保护**：每个规则的冷却时间防止操作风暴
+- **强制通知**：所有自动化操作都会记录并通知
+
+### SQLite 审计追踪
+
+- **`automation_actions` 表**：所有自动化事件的完整审计追踪
+- **`banned_ips` 表**：追踪活跃封禁及其 TTL 和元数据
+
+### 配置
+
+- **`config.yaml.example`**：v1.1.0 的推荐起点，预配置多站点、system_metrics 和 Guarded Automation
+
+---
+
 ## 🚀 快速开始
 
 ### 1. 安装
@@ -61,6 +95,8 @@ python3 -m pip install geoip2
 ### 2. 配置
 
 生成或编辑 `config.yaml`：
+
+从 `1.1.0` 开始，建议优先复制 [`config.yaml.example`](config.yaml.example) 为 `config.yaml`。该模板已经包含多站点 `sites[]`、全局 `system_metrics`、Webhook 渠道以及默认安全开启的 Guarded Automation 配置。
 
 ```yaml
 agent:

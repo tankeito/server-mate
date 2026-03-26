@@ -8,6 +8,7 @@ import datetime as dt
 import json
 import math
 import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -34,7 +35,14 @@ except ImportError:  # pragma: no cover
     FuncFormatter = None
     MaxNLocator = None
 
-from server_agent import get_timezone, load_config
+from server_agent import (
+    HOST_METRIC_SITE,
+    build_site_runtime_config,
+    find_site,
+    get_timezone,
+    load_config,
+    resolve_sites,
+)
 from webhook_center import send_markdown_message
 
 
@@ -430,6 +438,7 @@ def parse_args() -> argparse.Namespace:
 
     daily_parser = subparsers.add_parser("daily", help="Generate a daily markdown report.")
     daily_parser.add_argument("--date", help="Local date in YYYY-MM-DD.")
+    daily_parser.add_argument("--site", help="Generate report for a specific site domain.")
     daily_parser.add_argument("--output", type=Path, help="Optional markdown output path.")
     daily_parser.add_argument("--send", action="store_true")
     daily_parser.add_argument("--channels", nargs="+")
@@ -442,6 +451,7 @@ def parse_args() -> argparse.Namespace:
         default="weekly",
     )
     pdf_parser.add_argument("--end-date", help="Local end date in YYYY-MM-DD.")
+    pdf_parser.add_argument("--site", help="Generate report for a specific site domain.")
     pdf_parser.add_argument("--output", type=Path, help="Optional PDF output path.")
     pdf_parser.add_argument("--send", action="store_true")
     pdf_parser.add_argument("--channels", nargs="+")
@@ -659,6 +669,35 @@ def query_metric_rows(
         (
             config["agent"]["host_id"],
             config["agent"]["site"],
+            minutes,
+            start_local.isoformat(),
+            end_local.isoformat(),
+        ),
+    ).fetchall()
+
+
+def query_host_metric_rows(
+    connection: sqlite3.Connection,
+    config: dict[str, Any],
+    start_local: dt.datetime,
+    end_local: dt.datetime,
+    bucket_minutes: int | None = None,
+) -> list[sqlite3.Row]:
+    minutes = bucket_minutes if bucket_minutes is not None else resolve_primary_bucket_minutes(config)
+    return connection.execute(
+        """
+        SELECT *
+        FROM metric_rollups
+        WHERE host_id = ?
+          AND site = ?
+          AND bucket_minutes = ?
+          AND bucket_start >= ?
+          AND bucket_start < ?
+        ORDER BY bucket_start
+        """,
+        (
+            config["agent"]["host_id"],
+            HOST_METRIC_SITE,
             minutes,
             start_local.isoformat(),
             end_local.isoformat(),
@@ -1007,6 +1046,7 @@ def daily_summary(connection: sqlite3.Connection, config: dict[str, Any], report
     timezone = get_timezone(config)
     start_local, end_local = local_day_window(report_date, timezone)
     rows = query_metric_rows(connection, config, start_local, end_local)
+    host_rows = query_host_metric_rows(connection, config, start_local, end_local)
     fallback_rows = query_metric_rows(
         connection,
         config,
@@ -1117,11 +1157,11 @@ def daily_summary(connection: sqlite3.Connection, config: dict[str, Any], report
             else None,
         },
         "system": {
-            "avg_cpu_pct": mean_metric_rows(rows, "avg_cpu_pct"),
-            "max_cpu_pct": max_metric_rows(rows, "max_cpu_pct"),
-            "avg_memory_pct": mean_metric_rows(rows, "avg_memory_pct"),
-            "max_memory_pct": max_metric_rows(rows, "max_memory_pct"),
-            "min_disk_free_bytes": min_metric_rows(rows, "min_disk_free_bytes"),
+            "avg_cpu_pct": mean_metric_rows(host_rows, "avg_cpu_pct"),
+            "max_cpu_pct": max_metric_rows(host_rows, "max_cpu_pct"),
+            "avg_memory_pct": mean_metric_rows(host_rows, "avg_memory_pct"),
+            "max_memory_pct": max_metric_rows(host_rows, "max_memory_pct"),
+            "min_disk_free_bytes": min_metric_rows(host_rows, "min_disk_free_bytes"),
         },
         "status_codes": status_codes,
         "status_families": aggregate_status_families(status_codes),
@@ -1211,6 +1251,7 @@ def period_summary(
     days = 7 if report_kind == "weekly" else 30
     start_local, end_local, dates = build_date_window(end_date, days, timezone)
     rows = query_metric_rows(connection, config, start_local, end_local)
+    host_rows = query_host_metric_rows(connection, config, start_local, end_local)
     exact_uv = query_distinct_count(connection, config, "visitor_rollups", "visitor_hash", start_local, end_local)
     exact_ips = query_distinct_count(connection, config, "client_ip_rollups", "client_ip", start_local, end_local)
 
@@ -1388,9 +1429,9 @@ def period_summary(
             )
             if any(row["bandwidth_in_bytes"] is not None for row in rows)
             else None,
-            "cpu_peak": max_metric_rows(rows, "max_cpu_pct"),
-            "memory_peak": max_metric_rows(rows, "max_memory_pct"),
-            "disk_free_min": min_metric_rows(rows, "min_disk_free_bytes"),
+            "cpu_peak": max_metric_rows(host_rows, "max_cpu_pct"),
+            "memory_peak": max_metric_rows(host_rows, "max_memory_pct"),
+            "disk_free_min": min_metric_rows(host_rows, "min_disk_free_bytes"),
         },
         "status_codes": status_codes,
         "status_families": aggregate_status_families(status_codes),
@@ -6635,16 +6676,78 @@ def resolve_report_scope(config: dict[str, Any], report_kind: str) -> dict[str, 
     return reports.get(report_kind, {})
 
 
-def build_report_filename(config: dict[str, Any], report_kind: str, report_date: dt.date, suffix: str) -> str:
+def normalize_filename_part(value: str | None, fallback: str) -> str:
+    text = (value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "-", text)
+    text = text.strip("-")
+    return text or fallback
+
+
+def build_report_filename(
+    config: dict[str, Any],
+    report_kind: str,
+    report_date: dt.date,
+    suffix: str,
+    site_name: str | None = None,
+) -> str:
     language = report_language(config)
-    return f"server_mate_{report_kind}_report_{language}_{report_date.isoformat()}.{suffix}"
+    locale = "zh-cn" if language == "zh" else "en"
+    agent = config.get("agent", {})
+    resolved_site = site_name or agent.get("site") or agent.get("site_host") or agent.get("host_id") or "server"
+    site_slug = normalize_filename_part(str(resolved_site), "server")
+    report_slug = normalize_filename_part(report_kind, "report")
+    return f"server-mate-{site_slug}-{report_slug}-{report_date.isoformat()}-{locale}.{suffix}"
 
 
-def resolve_output_path(config: dict[str, Any], report_kind: str, report_date: dt.date, suffix: str) -> Path:
+def resolve_output_path(
+    config: dict[str, Any],
+    report_kind: str,
+    report_date: dt.date,
+    suffix: str,
+    site_name: str | None = None,
+) -> Path:
     scope = resolve_report_scope(config, report_kind)
     output_dir = Path(scope.get("output_dir") or "./reports")
     output_dir.mkdir(parents=True, exist_ok=True)
-    return output_dir / build_report_filename(config, report_kind, report_date, suffix)
+    return output_dir / build_report_filename(config, report_kind, report_date, suffix, site_name)
+
+
+def resolve_requested_sites(config: dict[str, Any], site_name: str | None) -> list[dict[str, Any]]:
+    if site_name:
+        matched = find_site(config, site_name)
+        return [matched] if matched else []
+    sites = resolve_sites(config)
+    if sites:
+        return sites
+    fallback_site = {
+        "domain": config.get("agent", {}).get("site") or "default",
+        "site_host": config.get("agent", {}).get("site_host") or config.get("agent", {}).get("site") or "default",
+        "access_log": config.get("logs", {}).get("access_log") or "",
+        "error_log": config.get("logs", {}).get("error_log") or "",
+        "enabled": True,
+    }
+    return [fallback_site]
+
+
+def resolve_site_output_path(
+    output_override: Path | None,
+    config: dict[str, Any],
+    report_kind: str,
+    report_date: dt.date,
+    suffix: str,
+    site_name: str,
+    multi_site: bool,
+) -> Path:
+    if output_override is None:
+        return resolve_output_path(config, report_kind, report_date, suffix, site_name)
+
+    if not multi_site and output_override.suffix.lower() == f".{suffix.lower()}":
+        output_override.parent.mkdir(parents=True, exist_ok=True)
+        return output_override
+
+    output_dir = output_override if output_override.suffix == "" else output_override.parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir / build_report_filename(config, report_kind, report_date, suffix, site_name)
 
 
 def export_report_file(config: dict[str, Any], report_kind: str, local_path: Path) -> tuple[Path, str | None]:
@@ -6715,36 +6818,98 @@ def main() -> int:
     config, _generated = load_config(config_path)
     connection = open_database(Path(config["storage"]["database_file"]))
     try:
+        selected_sites = resolve_requested_sites(config, getattr(args, "site", None))
+        if not selected_sites:
+            raise SystemExit(f"No matching site found for --site={getattr(args, 'site', '')}")
+
         if (args.command or "daily") == "pdf":
             timezone = get_timezone(config)
             report_kind = getattr(args, "range", "weekly")
             default_offset = -1 if report_kind == "daily" else 0
             report_date = parse_local_date(getattr(args, "end_date", None), timezone, default_offset)
-            report = prepare_report(connection, config, report_kind, report_date)
-            output_path = getattr(args, "output", None) or resolve_output_path(config, report_kind, report_date, "pdf")
-            local_path = render_pdf(report, config, output_path)
-            exported_path, public_url = export_report_file(config, report_kind, local_path)
-            delivery_results = None
-            if getattr(args, "send", False):
-                delivery_results = send_report_notice(config, report_kind, report, local_path, exported_path, public_url, getattr(args, "channels", None))
-            payload = build_json_payload(report_kind, report, local_path, exported_path, public_url, delivery_results)
-            emit_text(json.dumps(payload, indent=2, ensure_ascii=False) if getattr(args, "json", False) or getattr(args, "send", False) else str(local_path.resolve()))
+            multi_site = len(selected_sites) > 1
+            payloads: list[dict[str, Any]] = []
+            for site in selected_sites:
+                site_config = build_site_runtime_config(config, site)
+                report = prepare_report(connection, site_config, report_kind, report_date)
+                output_path = resolve_site_output_path(
+                    getattr(args, "output", None),
+                    site_config,
+                    report_kind,
+                    report_date,
+                    "pdf",
+                    str(report.get("meta", {}).get("site") or ""),
+                    multi_site,
+                )
+                local_path = render_pdf(report, site_config, output_path)
+                exported_path, public_url = export_report_file(site_config, report_kind, local_path)
+                delivery_results = None
+                if getattr(args, "send", False):
+                    delivery_results = send_report_notice(
+                        site_config,
+                        report_kind,
+                        report,
+                        local_path,
+                        exported_path,
+                        public_url,
+                        getattr(args, "channels", None),
+                    )
+                payloads.append(
+                    build_json_payload(
+                        report_kind,
+                        report,
+                        local_path,
+                        exported_path,
+                        public_url,
+                        delivery_results,
+                    )
+                )
+            if getattr(args, "json", False) or getattr(args, "send", False):
+                emit_text(json.dumps(payloads[0] if len(payloads) == 1 else payloads, indent=2, ensure_ascii=False))
+            else:
+                emit_text("\n".join(item["pdf_path"] for item in payloads if item.get("pdf_path")))
             return 0
 
         timezone = get_timezone(config)
         report_date = parse_local_date(getattr(args, "date", None), timezone, -1)
-        report = daily_summary(connection, config, report_date)
-        markdown = render_daily_markdown(report, config)
-        output_path = getattr(args, "output", None) or resolve_output_path(config, "daily", report_date, "md")
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(markdown, encoding="utf-8")
-        exported_path, public_url = export_report_file(config, "daily", output_path)
-        delivery_results = None
-        if getattr(args, "send", False):
-            delivery_results = send_report_notice(config, "daily", report, output_path, exported_path, public_url, getattr(args, "channels", None))
-        payload = build_json_payload("daily", report, output_path, exported_path, public_url, delivery_results)
-        payload["markdown"] = markdown
-        emit_text(json.dumps(payload, indent=2, ensure_ascii=False) if getattr(args, "json", False) or getattr(args, "send", False) else markdown)
+        multi_site = len(selected_sites) > 1
+        payloads: list[dict[str, Any]] = []
+        rendered_markdowns: list[str] = []
+        for site in selected_sites:
+            site_config = build_site_runtime_config(config, site)
+            report = daily_summary(connection, site_config, report_date)
+            markdown = render_daily_markdown(report, site_config)
+            output_path = resolve_site_output_path(
+                getattr(args, "output", None),
+                site_config,
+                "daily",
+                report_date,
+                "md",
+                str(report.get("meta", {}).get("site") or ""),
+                multi_site,
+            )
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(markdown, encoding="utf-8")
+            exported_path, public_url = export_report_file(site_config, "daily", output_path)
+            delivery_results = None
+            if getattr(args, "send", False):
+                delivery_results = send_report_notice(
+                    site_config,
+                    "daily",
+                    report,
+                    output_path,
+                    exported_path,
+                    public_url,
+                    getattr(args, "channels", None),
+                )
+            payload = build_json_payload("daily", report, output_path, exported_path, public_url, delivery_results)
+            payload["markdown"] = markdown
+            payloads.append(payload)
+            rendered_markdowns.append(markdown)
+        if getattr(args, "json", False) or getattr(args, "send", False):
+            emit_text(json.dumps(payloads[0] if len(payloads) == 1 else payloads, indent=2, ensure_ascii=False))
+        else:
+            emit_text(rendered_markdowns[0] if len(rendered_markdowns) == 1 else "\n".join(item["markdown_path"] for item in payloads if item.get("markdown_path")))
         return 0
     finally:
         connection.close()

@@ -1,0 +1,135 @@
+# Server-Mate 1.1.0 example configuration
+
+agent:
+  host_id: web-01
+  timezone: Asia/Shanghai
+  mode: once
+  poll_interval_seconds: 60
+  state_file: ./server_agent_state.json
+  startup_mode: tail
+  bootstrap_tail_lines: 5000
+  retention_minutes: 180
+  max_buffer_events: 20000
+  emit_events: false
+
+system_metrics:
+  enabled: true
+  disk_root: /
+  collect_network_io: true
+
+sites:
+  - domain: agent.btc354.com
+    site_host: agent.btc354.com
+    enabled: true
+    access_log: /www/wwwlogs/agent.btc354.com.log
+    error_log: /www/server/panel/vhost/nginx/agent.btc354.com.error.log
+  - domain: api.example.com
+    site_host: api.example.com
+    enabled: true
+    access_log: /var/log/nginx/api.example.com.access.log
+    error_log: /var/log/nginx/api.example.com.error.log
+
+thresholds:
+  summary_window_minutes: 10
+  slow_ms: 2000.0
+  attack_rpm_threshold: 200
+  cpu_pct: 85.0
+  memory_pct: 85.0
+  hardware_window_minutes: 5
+  disk_free_ratio: 0.10
+  server_error_window_minutes: 1
+  server_error_count: 20
+  scan_404_count: 20
+  scan_404_distinct_uris: 10
+
+storage:
+  database_file: ./server_agent.sqlite3
+  rollup_minutes: [10, 60]
+
+notifications:
+  webhooks:
+    dingtalk:
+      enabled: true
+      url: https://oapi.dingtalk.com/robot/send?access_token=YOUR_TOKEN
+      timeout_seconds: 10
+      at_all: false
+    wecom:
+      enabled: false
+      url: https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=YOUR_KEY
+      timeout_seconds: 10
+    feishu:
+      enabled: false
+      url: https://open.feishu.cn/open-apis/bot/v2/hook/YOUR_TOKEN
+      timeout_seconds: 10
+  alerts:
+    enabled: true
+    minimum_severity: warning
+    cooldown_seconds: 300
+    channels: [dingtalk]
+  reports:
+    report_language: zh
+    report_export_dir: /srv/reports/server-mate
+    public_base_url: https://ops.example.com/reports
+    geoip_city_db: /opt/GeoLite2-City.mmdb
+    ai_analysis:
+      enabled: true
+      simulate: false
+      endpoint: https://api.openai.com/v1
+      base_url: https://api.openai.com/v1
+      model: gpt-4o-mini
+      api_key_env: OPENAI_API_KEY
+      timeout_seconds: 20
+    daily:
+      enabled: true
+      push_time: "08:30"
+      channels: [dingtalk]
+      output_dir: ./reports
+      report_export_dir: /srv/reports/server-mate
+      public_base_url: https://ops.example.com/reports
+      send_on_startup_if_missed: false
+    weekly:
+      enabled: true
+      push_weekday: 1
+      push_time: "09:00"
+      channels: [dingtalk]
+      output_dir: ./reports
+      report_export_dir: /srv/reports/server-mate
+      public_base_url: https://ops.example.com/reports
+    monthly:
+      enabled: true
+      push_day: 1
+      push_time: "09:30"
+      channels: [dingtalk]
+      output_dir: ./reports
+      report_export_dir: /srv/reports/server-mate
+      public_base_url: https://ops.example.com/reports
+
+automation:
+  dry_run: true
+  auto_ban:
+    enabled: false
+    channels: [dingtalk]
+    whitelist_ips:
+      - 127.0.0.1
+      - "::1"
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 100.64.0.0/10
+    whitelist_spiders:
+      - googlebot
+      - baiduspider
+      - bingbot
+    ban_ttl_seconds: 86400
+    timeout_seconds: 15
+    max_active_bans: 200
+    command_template: "iptables -I INPUT -s {ip} -j DROP"
+    unban_command_template: "iptables -D INPUT -s {ip} -j DROP"
+  auto_heal:
+    enabled: false
+    channels: [dingtalk]
+    services: [php-fpm, nginx]
+    trigger_kinds: [server_error_burst]
+    cooldown_seconds: 3600
+    timeout_seconds: 30
+    command_template: "systemctl restart {service}"

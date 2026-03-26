@@ -1,9 +1,12 @@
 ---
 name: server-mate
+version: 1.1.0
 description: Build or extend a lightweight server monitoring and AI operations workflow for Linux hosts running Nginx or Apache. Use when Codex needs to collect psutil metrics, parse access or error logs, design JSON payloads or APIs, add webhook alerts, generate daily or weekly ops reports, answer natural-language monitoring questions, or implement guarded auto-ban and auto-heal behaviors.
 ---
 
 # Server Mate
+
+Version: `1.1.0`
 
 Use this skill to design or implement a two-plane monitoring system:
 - a Python agent on the server that tails logs and samples host metrics
@@ -42,8 +45,10 @@ Use this skill to design or implement a two-plane monitoring system:
 
 - Prefer Python, `psutil`, and the standard library for the first implementation.
 - Prefer a generated `config.yaml` plus SQLite for local state and historical rollups before adding external services.
+- Prefer the `system_metrics + sites[]` matrix layout from [config.yaml.example](config.yaml.example) instead of new single-site keys.
 - Support configurable log paths. Do not hardcode site layouts when the vhost config can be read instead.
 - Emit structured JSON with timezone-aware timestamps, host or site identifiers, event type, and enough raw context to debug parser mistakes.
+- In multi-site mode, collect host CPU or memory metrics once per cycle and keep site log parsing isolated per domain.
 - Separate parsing, aggregation, transport, and action execution so that HTTP push, stdout replay, file drop, or websocket transport can be swapped independently.
 - Keep unknown lines and parser failures as first-class counters instead of dropping them silently.
 
@@ -61,8 +66,12 @@ Use this skill to design or implement a two-plane monitoring system:
 ## Safety rules
 
 - Treat auto-ban and auto-heal as opt-in features.
+- Default Guarded Automation to `dry_run: true` and keep it there until the user has observed automation notifications and audit history for several days.
 - Require cooldowns, max actions per window, and allowlists before running firewall or restart commands.
+- Require whitelist checks before any ban command. Never ban loopback, RFC1918 private ranges, or trusted crawler families by default.
+- Require TTL-based unban or an equivalent release plan for every ban. Do not create permanent firewall blocks from the first implementation.
 - Record an audit event for every alert, dry-run, ban, unban, restart, and failed remediation attempt.
+- Store audit history in SQLite tables such as `automation_actions` and `banned_ips`, and expose simple lookup queries in user-facing docs.
 - Prefer one-shot remediation followed by escalation. Do not loop restarts.
 
 ## Report expectations
@@ -83,6 +92,14 @@ Use external scheduling for production unless the user explicitly wants an alway
   - Daily PDF push at `01:00`.
   - Weekly PDF push every Monday at `01:10`.
   - Monthly PDF push on day `1` at `01:20`.
+- In multi-site mode, a single scheduled `report_generator.py` run should iterate over every configured site unless the user explicitly passes `--site`.
+
+## Release notes for 1.1.0
+
+- Multi-site matrix config using `sites[]` plus global `system_metrics`
+- Host-global metrics stored separately from site-local business rollups
+- Logrotate-tolerant incremental readers with inode or truncate recovery
+- Guarded Automation with `dry_run`, whitelist checks, TTL-based unban, cooldown-based auto-heal, and SQLite audit trail
 
 Copyable cron examples:
 

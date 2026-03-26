@@ -5,6 +5,8 @@ English | [中文](README_ZH.md)
 # 🖥️ Server-Mate | Lightweight Server Monitoring & AI Ops
 
 > A two-plane monitoring system for Linux hosts running Nginx or Apache.
+>
+> Version: `1.1.0`
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Platform-CentOS%2FUbuntu%2FDebian-lightgrey.svg)](https://linux.org)
@@ -42,6 +44,38 @@ It splits responsibilities into two planes:
 
 ---
 
+## 🆕 What's New in v1.1.0
+
+### Multi-Site Monitoring
+
+- **Matrix Configuration**: Monitor multiple domains on the same host with `sites[]` array
+- **System Metrics**: Dedicated `system_metrics` section for host-global resources (CPU, memory, disk, network)
+- **Scope Separation**: Host-global metrics separated from site-local traffic rollups via `__host__` scope
+
+### Hardened Log Reading
+
+- **Logrotate Support**: Handles inode changes, file truncation, and temporary file absence
+- **Incremental Reading**: Robust state tracking across log rotations and restarts
+
+### Guarded Automation
+
+- **Dry-Run Mode**: Test automation policies before enabling real actions
+- **Whitelist-Aware Auto-Ban**: Protects trusted IPs and known spiders (Googlebot, Bingbot, Baiduspider)
+- **TTL-Based Unban**: Automatic unban after configurable TTL (default: 24 hours)
+- **Cooldown Protection**: Prevents action storms with per-rule cooldowns
+- **Mandatory Notifications**: All automation actions logged and notified
+
+### SQLite Audit Tracking
+
+- **`automation_actions` Table**: Complete audit trail of all automation events
+- **`banned_ips` Table**: Track active bans with TTL and metadata
+
+### Configuration
+
+- **`config.yaml.example`**: Recommended starting point for v1.1.0 with multi-site, system_metrics, and Guarded Automation pre-configured
+
+---
+
 ## 🚀 Quick Start
 
 ### 1. Installation
@@ -61,6 +95,8 @@ python3 -m pip install geoip2
 ### 2. Configuration
 
 Generate or edit `config.yaml`:
+
+For `1.1.0`, it is recommended to copy [`config.yaml.example`](config.yaml.example) to `config.yaml` first. The example already includes multi-site `sites[]`, global `system_metrics`, webhook channels, and Guarded Automation with `dry_run: true`.
 
 ```yaml
 agent:
