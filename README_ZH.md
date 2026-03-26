@@ -72,7 +72,7 @@
 
 ### 配置
 
-- **`config.yaml.example`**：v1.1.0 的推荐起点，预配置多站点、system_metrics 和 Guarded Automation
+- **`config.example.yaml`**：v1.1.0 的推荐起点，预配置多站点、system_metrics 和 Guarded Automation
 
 ---
 
@@ -96,7 +96,7 @@ python3 -m pip install geoip2
 
 生成或编辑 `config.yaml`：
 
-从 `1.1.0` 开始，建议优先复制 [`config.yaml.example`](config.yaml.example) 为 `config.yaml`。该模板已经包含多站点 `sites[]`、全局 `system_metrics`、Webhook 渠道以及默认安全开启的 Guarded Automation 配置。
+从 `1.1.0` 开始，建议优先复制 [`config.example.yaml`](config.example.yaml) 为 `config.yaml`。该模板已经包含多站点 `sites[]`、全局 `system_metrics`、Webhook 渠道以及默认安全开启的 Guarded Automation 配置。
 
 ```yaml
 agent:

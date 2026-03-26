@@ -95,7 +95,7 @@ Common examples:
 Main config file:
 
 - `config.yaml`
-- Copy [`config.yaml.example`](/E:/ai/Server-Mate/config.yaml.example) to `config.yaml` and then adjust paths, webhooks, and automation switches for your environment.
+- Copy [`config.example.yaml`](/E:/ai/Server-Mate/config.example.yaml) to `config.yaml` and then adjust paths, webhooks, and automation switches for your environment.
 
 If the file is missing, the agent can generate a default one automatically.
 
@@ -174,7 +174,7 @@ automation:
     cooldown_seconds: 3600
 ```
 
-For a production-ready template, start from [`config.yaml.example`](/E:/ai/Server-Mate/config.yaml.example).
+For a production-ready template, start from [`config.example.yaml`](/E:/ai/Server-Mate/config.example.yaml).
 
 ## 4. Parameter Reference
 

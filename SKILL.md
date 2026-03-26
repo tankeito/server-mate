@@ -45,7 +45,7 @@ Use this skill to design or implement a two-plane monitoring system:
 
 - Prefer Python, `psutil`, and the standard library for the first implementation.
 - Prefer a generated `config.yaml` plus SQLite for local state and historical rollups before adding external services.
-- Prefer the `system_metrics + sites[]` matrix layout from [config.yaml.example](config.yaml.example) instead of new single-site keys.
+- Prefer the `system_metrics + sites[]` matrix layout from [config.example.yaml](config.example.yaml) instead of new single-site keys.
 - Support configurable log paths. Do not hardcode site layouts when the vhost config can be read instead.
 - Emit structured JSON with timezone-aware timestamps, host or site identifiers, event type, and enough raw context to debug parser mistakes.
 - In multi-site mode, collect host CPU or memory metrics once per cycle and keep site log parsing isolated per domain.

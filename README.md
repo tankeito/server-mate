@@ -72,7 +72,7 @@ It splits responsibilities into two planes:
 
 ### Configuration
 
-- **`config.yaml.example`**: Recommended starting point for v1.1.0 with multi-site, system_metrics, and Guarded Automation pre-configured
+- **`config.example.yaml`**: Recommended starting point for v1.1.0 with multi-site, system_metrics, and Guarded Automation pre-configured
 
 ---
 
@@ -96,7 +96,7 @@ python3 -m pip install geoip2
 
 Generate or edit `config.yaml`:
 
-For `1.1.0`, it is recommended to copy [`config.yaml.example`](config.yaml.example) to `config.yaml` first. The example already includes multi-site `sites[]`, global `system_metrics`, webhook channels, and Guarded Automation with `dry_run: true`.
+For `1.1.0`, it is recommended to copy [`config.example.yaml`](config.example.yaml) to `config.yaml` first. The example already includes multi-site `sites[]`, global `system_metrics`, webhook channels, and Guarded Automation with `dry_run: true`.
 
 ```yaml
 agent:
