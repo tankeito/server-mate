@@ -1,0 +1,76 @@
+{
+  "name": "server-mate",
+  "version": "1.0.0",
+  "description": "Lightweight server monitoring and AI operations workflow for CentOS hosts running Baota/BT Panel with Nginx or Apache",
+  "author": "tankeito",
+  "license": "MIT",
+  "homepage": "https://github.com/tankeito/server-mate",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tankeito/server-mate.git"
+  },
+  "keywords": [
+    "server-monitoring",
+    "ai-ops",
+    "centos",
+    "baota",
+    "bt-panel",
+    "nginx",
+    "apache",
+    "log-analysis",
+    "webhook-alerts",
+    "auto-remediation"
+  ],
+  "platform": [
+    "CentOS",
+    "Ubuntu",
+    "Debian",
+    "Rocky Linux",
+    "AlmaLinux"
+  ],
+  "language": [
+    "Python"
+  ],
+  "dependencies": {
+    "python": ">=3.8",
+    "packages": [
+      "psutil",
+      "pyyaml",
+      "matplotlib"
+    ],
+    "optional": [
+      "geoip2",
+      "requests"
+    ]
+  },
+  "features": [
+    "Real-time host metrics (CPU, memory, disk, network)",
+    "Nginx/Apache access and error log parsing",
+    "Traffic analysis (PV, UV, IP, QPS, bandwidth)",
+    "Spider detection and traffic separation",
+    "Threshold-based webhook alerts",
+    "AI-powered error diagnosis",
+    "Daily/Weekly/Monthly PDF reports",
+    "Guarded auto-ban and auto-heal automation"
+  ],
+  "integrations": [
+    "DingTalk webhook",
+    "WeCom webhook",
+    "ServerChan",
+    "OpenClaw AI analyzer",
+    "SQLite for local storage"
+  ],
+  "scripts": {
+    "agent": "python3 scripts/server_agent.py --config config.yaml --once",
+    "report-daily": "python3 scripts/report_generator.py --config config.yaml pdf --range daily --send",
+    "report-weekly": "python3 scripts/report_generator.py --config config.yaml pdf --range weekly --send",
+    "report-monthly": "python3 scripts/report_generator.py --config config.yaml pdf --range monthly --send"
+  },
+  "config": {
+    "default_config_file": "config.yaml",
+    "default_log_dir": "/var/log/server-mate/",
+    "default_data_dir": "/opt/server-mate/"
+  },
+  "created_at": "2026-03-26",
+  "updated_at": "2026-03-26"
+}

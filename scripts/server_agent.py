@@ -1,0 +1,2319 @@
+#!/usr/bin/env python3
+"""Config-driven collector and rollup writer for the Server-Mate skill."""
+
+from __future__ import annotations
+
+import argparse
+import collections
+import copy
+import datetime as dt
+import hashlib
+import json
+import re
+import shlex
+import socket
+import sqlite3
+import statistics
+import time
+import traceback
+from pathlib import Path
+from typing import Any, Iterable
+from urllib.parse import urlparse
+
+from webhook_center import SEVERITY_RANK, send_markdown_message
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover
+    ZoneInfo = None
+
+try:
+    import yaml
+except ImportError:  # pragma: no cover
+    yaml = None
+
+try:
+    import psutil
+except ImportError:  # pragma: no cover
+    psutil = None
+
+
+ACCESS_RE = re.compile(
+    r'^(?P<client_ip>\S+) \S+ \S+ \[(?P<timestamp>[^\]]+)\] '
+    r'"(?P<request>[^"]*)" (?P<status>\d{3}) (?P<body_bytes_sent>\S+) '
+    r'"(?P<referer>[^"]*)" "(?P<user_agent>[^"]*)"(?: (?P<tail>.*))?$'
+)
+
+NGINX_ERROR_RE = re.compile(
+    r"^(?P<timestamp>\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}) "
+    r"\[(?P<level>[^\]]+)\] (?P<message>.*)$"
+)
+
+APACHE_ERROR_RE = re.compile(
+    r"^\[(?P<timestamp>[^\]]+)\] \[(?P<module>[^\]]+)\]"
+    r"(?: \[pid (?P<pid>\d+)(?::tid [^\]]+)?\])?"
+    r"(?: \[client (?P<client>[^\]]+)\])? (?P<message>.*)$"
+)
+
+IP_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
+
+SEARCH_HOSTS = {
+    "google.": "google",
+    "bing.com": "bing",
+    "baidu.com": "baidu",
+    "yandex.": "yandex",
+    "duckduckgo.com": "duckduckgo",
+    "so.com": "360-search",
+    "sogou.com": "sogou",
+}
+
+SPIDER_PATTERNS = [
+    (re.compile(r"googlebot", re.I), "googlebot"),
+    (re.compile(r"baiduspider", re.I), "baiduspider"),
+    (re.compile(r"bingbot", re.I), "bingbot"),
+    (re.compile(r"yandexbot", re.I), "yandexbot"),
+    (re.compile(r"duckduckbot", re.I), "duckduckbot"),
+    (re.compile(r"slurp", re.I), "yahoo-slurp"),
+    (re.compile(r"petalbot", re.I), "petalbot"),
+    (re.compile(r"semrushbot", re.I), "semrushbot"),
+    (re.compile(r"ahrefsbot", re.I), "ahrefsbot"),
+    (re.compile(r"mj12bot", re.I), "mj12bot"),
+    (re.compile(r"curl|python-requests|wget", re.I), "cli-client"),
+    (re.compile(r"sqlmap|nikto|nmap|masscan|zgrab|gobuster|dirbuster", re.I), "scanner"),
+]
+
+CLIENT_FAMILY_PATTERNS = [
+    (re.compile(r"micromessenger", re.I), "WeChat"),
+    (re.compile(r"edg|edge", re.I), "Edge"),
+    (re.compile(r"opr|opera", re.I), "Opera"),
+    (re.compile(r"firefox", re.I), "Firefox"),
+    (re.compile(r"chrome|crios", re.I), "Chrome"),
+    (re.compile(r"safari", re.I), "Safari"),
+    (re.compile(r"msie|trident", re.I), "IE"),
+    (re.compile(r"curl|python-requests|wget|httpie", re.I), "Automation"),
+]
+
+ERROR_RULES = [
+    ("primary_script_unknown", ["primary script unknown"]),
+    ("permission_denied", ["permission denied"]),
+    ("client_denied", ["client denied"]),
+    ("ssl_error", ["ssl"]),
+    ("upstream_timeout", ["upstream timed out"]),
+    ("upstream_connect_failed", ["connect() failed"]),
+    ("bad_gateway", ["bad gateway"]),
+    ("php_fatal", ["php fatal"]),
+]
+
+DEFAULT_CONFIG = {
+    "agent": {
+        "host_id": socket.gethostname(),
+        "site": "default",
+        "site_host": "",
+        "timezone": "Asia/Shanghai",
+        "disk_root": "/",
+        "mode": "once",
+        "poll_interval_seconds": 60,
+        "state_file": "./server_agent_state.json",
+        "startup_mode": "tail",
+        "bootstrap_tail_lines": 5000,
+        "retention_minutes": 180,
+        "max_buffer_events": 20000,
+        "emit_events": False,
+    },
+    "logs": {
+        "access_log": "./access.log",
+        "error_log": "./error.log",
+    },
+    "thresholds": {
+        "summary_window_minutes": 10,
+        "slow_ms": 2000.0,
+        "attack_rpm_threshold": 200,
+        "cpu_pct": 85.0,
+        "memory_pct": 85.0,
+        "hardware_window_minutes": 5,
+        "disk_free_ratio": 0.10,
+        "server_error_window_minutes": 1,
+        "server_error_count": 20,
+        "scan_404_count": 20,
+        "scan_404_distinct_uris": 10,
+    },
+    "storage": {
+        "database_file": "./server_agent.sqlite3",
+        "rollup_minutes": [10, 60],
+    },
+    "notifications": {
+        "webhooks": {
+            "dingtalk": {
+                "enabled": False,
+                "url": "",
+                "timeout_seconds": 10,
+                "at_all": False,
+            },
+            "wecom": {
+                "enabled": False,
+                "url": "",
+                "timeout_seconds": 10,
+            },
+            "feishu": {
+                "enabled": False,
+                "url": "",
+                "timeout_seconds": 10,
+            },
+        },
+        "alerts": {
+            "enabled": True,
+            "minimum_severity": "warning",
+            "cooldown_seconds": 300,
+            "channels": ["dingtalk"],
+        },
+        "reports": {
+            "report_language": "zh",
+            "report_export_dir": "",
+            "public_base_url": "",
+            "geoip_city_db": "",
+            "ai_analysis": {
+                "enabled": True,
+                "simulate": False,
+                "endpoint": "",
+                "base_url": "",
+                "model": "gpt-4o-mini",
+                "api_key_env": "OPENAI_API_KEY",
+                "timeout_seconds": 20,
+            },
+            "daily": {
+                "enabled": False,
+                "push_time": "08:30",
+                "channels": ["dingtalk"],
+                "output_dir": "./reports",
+                "report_export_dir": "",
+                "public_base_url": "",
+                "send_on_startup_if_missed": False,
+            },
+            "weekly": {
+                "enabled": False,
+                "push_weekday": 1,
+                "push_time": "09:00",
+                "channels": ["dingtalk"],
+                "output_dir": "./reports",
+                "report_export_dir": "",
+                "public_base_url": "",
+            },
+            "monthly": {
+                "enabled": False,
+                "push_day": 1,
+                "push_time": "09:30",
+                "channels": ["dingtalk"],
+                "output_dir": "./reports",
+                "report_export_dir": "",
+                "public_base_url": "",
+            },
+        },
+    },
+}
+
+DEFAULT_STATE = {
+    "cursors": {},
+    "history": {
+        "access_events": [],
+        "error_events": [],
+        "system_snapshots": [],
+    },
+    "delivery": {
+        "alert_cooldowns": {},
+        "reports": {
+            "daily": {},
+            "weekly": {},
+            "monthly": {},
+        },
+    },
+}
+
+SCHEMA_SQL = """
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS agent_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_started_at TEXT NOT NULL,
+    run_finished_at TEXT NOT NULL,
+    host_id TEXT NOT NULL,
+    site TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    access_lines_read INTEGER NOT NULL DEFAULT 0,
+    access_lines_dropped INTEGER NOT NULL DEFAULT 0,
+    error_lines_read INTEGER NOT NULL DEFAULT 0,
+    error_lines_dropped INTEGER NOT NULL DEFAULT 0,
+    rollups_upserted INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS metric_rollups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    host_id TEXT NOT NULL,
+    site TEXT NOT NULL,
+    bucket_start TEXT NOT NULL,
+    bucket_end TEXT NOT NULL,
+    bucket_minutes INTEGER NOT NULL,
+    request_count INTEGER NOT NULL DEFAULT 0,
+    pv INTEGER NOT NULL DEFAULT 0,
+    uv INTEGER NOT NULL DEFAULT 0,
+    unique_ips INTEGER NOT NULL DEFAULT 0,
+    active_users INTEGER NOT NULL DEFAULT 0,
+    qps REAL NOT NULL DEFAULT 0,
+    avg_response_ms REAL,
+    slow_request_count INTEGER NOT NULL DEFAULT 0,
+    bandwidth_out_bytes INTEGER NOT NULL DEFAULT 0,
+    bandwidth_in_bytes INTEGER,
+    total_errors INTEGER NOT NULL DEFAULT 0,
+    avg_cpu_pct REAL,
+    max_cpu_pct REAL,
+    avg_memory_pct REAL,
+    max_memory_pct REAL,
+    min_disk_free_bytes INTEGER,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(host_id, site, bucket_start, bucket_minutes)
+);
+"""
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run the Server-Mate collector in once or daemon mode."
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path("config.yaml"),
+        help="Path to config.yaml. A default file is created automatically if missing.",
+    )
+    parser.add_argument(
+        "--daemon",
+        action="store_true",
+        help="Run continuously using poll_interval_seconds from the config.",
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Run a single collection cycle and exit.",
+    )
+    parser.add_argument(
+        "--print-config",
+        action="store_true",
+        help="Print the normalized config and exit.",
+    )
+    return parser.parse_args()
+
+
+def utcnow() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def safe_json_text(data: Any) -> str:
+    return json.dumps(data, indent=2, sort_keys=True)
+
+
+def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = copy.deepcopy(base)
+    for key, value in override.items():
+        if (
+            key in merged
+            and isinstance(merged[key], dict)
+            and isinstance(value, dict)
+        ):
+            merged[key] = deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def write_default_config(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(safe_json_text(DEFAULT_CONFIG) + "\n", encoding="utf-8")
+
+
+def resolve_config_path(base_dir: Path, value: Any) -> Path:
+    path = Path(str(value or "")).expanduser()
+    if not path.is_absolute():
+        path = base_dir / path
+    return path.resolve()
+
+
+def normalize_string_list(value: Any, default: list[str] | None = None) -> list[str]:
+    if isinstance(value, str):
+        items = [value]
+    elif isinstance(value, list):
+        items = value
+    else:
+        items = default or []
+
+    normalized = []
+    for item in items:
+        name = str(item or "").strip().lower()
+        if name and name not in normalized:
+            normalized.append(name)
+    return normalized
+
+
+def normalize_clock_time(value: Any, default: str) -> str:
+    candidate = str(value or default).strip()
+    try:
+        hour_text, minute_text = candidate.split(":", 1)
+        hour = int(hour_text)
+        minute = int(minute_text)
+    except (ValueError, AttributeError):
+        return default
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        return default
+    return f"{hour:02d}:{minute:02d}"
+
+
+def normalize_config(config: dict[str, Any], config_path: Path) -> dict[str, Any]:
+    agent = config.setdefault("agent", {})
+    logs = config.setdefault("logs", {})
+    thresholds = config.setdefault("thresholds", {})
+    storage = config.setdefault("storage", {})
+    notifications = config.setdefault("notifications", {})
+    webhooks = notifications.setdefault("webhooks", {})
+    alerts_config = notifications.setdefault("alerts", {})
+    reports_config = notifications.setdefault("reports", {})
+
+    base_dir = config_path.parent.resolve()
+
+    agent["host_id"] = str(agent.get("host_id") or socket.gethostname())
+    agent["site"] = str(agent.get("site") or "default")
+    agent["site_host"] = str(agent.get("site_host") or agent["site"])
+    agent["timezone"] = str(agent.get("timezone") or "UTC")
+    agent["disk_root"] = str(agent.get("disk_root") or "/")
+    agent["mode"] = str(agent.get("mode") or "once").lower()
+    agent["poll_interval_seconds"] = max(int(agent.get("poll_interval_seconds", 60)), 1)
+    agent["startup_mode"] = str(agent.get("startup_mode") or "tail").lower()
+    agent["bootstrap_tail_lines"] = max(int(agent.get("bootstrap_tail_lines", 5000)), 0)
+    agent["retention_minutes"] = max(int(agent.get("retention_minutes", 180)), 10)
+    agent["max_buffer_events"] = max(int(agent.get("max_buffer_events", 20000)), 100)
+    agent["emit_events"] = bool(agent.get("emit_events", False))
+    agent["state_file"] = str(resolve_config_path(base_dir, agent.get("state_file")))
+
+    logs["access_log"] = str(resolve_config_path(base_dir, logs.get("access_log")))
+    logs["error_log"] = str(resolve_config_path(base_dir, logs.get("error_log")))
+
+    thresholds["summary_window_minutes"] = max(
+        int(thresholds.get("summary_window_minutes", 10)),
+        1,
+    )
+    thresholds["slow_ms"] = float(thresholds.get("slow_ms", 2000.0))
+    thresholds["attack_rpm_threshold"] = max(
+        int(thresholds.get("attack_rpm_threshold", 200)),
+        1,
+    )
+    thresholds["cpu_pct"] = float(thresholds.get("cpu_pct", 85.0))
+    thresholds["memory_pct"] = float(thresholds.get("memory_pct", 85.0))
+    thresholds["hardware_window_minutes"] = max(
+        int(thresholds.get("hardware_window_minutes", 5)),
+        1,
+    )
+    thresholds["disk_free_ratio"] = float(thresholds.get("disk_free_ratio", 0.10))
+    thresholds["server_error_window_minutes"] = max(
+        int(thresholds.get("server_error_window_minutes", 1)),
+        1,
+    )
+    thresholds["server_error_count"] = max(
+        int(thresholds.get("server_error_count", 20)),
+        1,
+    )
+    thresholds["scan_404_count"] = max(int(thresholds.get("scan_404_count", 20)), 1)
+    thresholds["scan_404_distinct_uris"] = max(
+        int(thresholds.get("scan_404_distinct_uris", 10)),
+        1,
+    )
+
+    rollup_minutes = storage.get("rollup_minutes", [10, 60])
+    if not isinstance(rollup_minutes, list) or not rollup_minutes:
+        rollup_minutes = [10, 60]
+    storage["rollup_minutes"] = sorted(
+        {max(int(value), 1) for value in rollup_minutes}
+    )
+    storage["database_file"] = str(
+        resolve_config_path(base_dir, storage.get("database_file"))
+    )
+
+    for channel_name in ("dingtalk", "wecom", "feishu"):
+        channel = webhooks.setdefault(channel_name, {})
+        channel["enabled"] = bool(channel.get("enabled", False))
+        channel["url"] = str(channel.get("url") or "")
+        channel["timeout_seconds"] = max(
+            int(channel.get("timeout_seconds", 10)),
+            1,
+        )
+        if channel_name == "dingtalk":
+            channel["at_all"] = bool(channel.get("at_all", False))
+
+    alerts_config["enabled"] = bool(alerts_config.get("enabled", True))
+    alerts_config["minimum_severity"] = str(
+        alerts_config.get("minimum_severity", "warning")
+    ).lower()
+    if alerts_config["minimum_severity"] not in SEVERITY_RANK:
+        alerts_config["minimum_severity"] = "warning"
+    alerts_config["cooldown_seconds"] = max(
+        int(alerts_config.get("cooldown_seconds", 300)),
+        0,
+    )
+    alerts_config["channels"] = normalize_string_list(
+        alerts_config.get("channels"),
+        ["dingtalk"],
+    )
+
+    reports_config["report_language"] = str(
+        reports_config.get("report_language", "zh") or "zh"
+    ).strip().lower()
+    if reports_config["report_language"] not in {"zh", "en"}:
+        reports_config["report_language"] = "zh"
+    reports_config["report_export_dir"] = str(
+        reports_config.get("report_export_dir") or ""
+    ).strip()
+    if reports_config["report_export_dir"]:
+        reports_config["report_export_dir"] = str(
+            resolve_config_path(base_dir, reports_config["report_export_dir"])
+        )
+    reports_config["public_base_url"] = str(
+        reports_config.get("public_base_url") or ""
+    ).strip()
+    reports_config["geoip_city_db"] = str(
+        reports_config.get("geoip_city_db") or ""
+    ).strip()
+    if reports_config["geoip_city_db"]:
+        reports_config["geoip_city_db"] = str(
+            resolve_config_path(base_dir, reports_config["geoip_city_db"])
+        )
+
+    ai_analysis = reports_config.setdefault("ai_analysis", {})
+    ai_analysis["enabled"] = bool(ai_analysis.get("enabled", True))
+    ai_analysis["simulate"] = bool(ai_analysis.get("simulate", False))
+    ai_analysis["endpoint"] = str(
+        ai_analysis.get("endpoint") or ai_analysis.get("base_url") or ""
+    ).strip()
+    ai_analysis["base_url"] = ai_analysis["endpoint"]
+    ai_analysis["model"] = str(ai_analysis.get("model") or "gpt-4o-mini").strip()
+    ai_analysis["api_key_env"] = str(
+        ai_analysis.get("api_key_env") or "OPENAI_API_KEY"
+    ).strip()
+    ai_analysis["timeout_seconds"] = max(
+        int(ai_analysis.get("timeout_seconds", 20)),
+        3,
+    )
+
+    daily_report = reports_config.setdefault("daily", {})
+    daily_report["enabled"] = bool(daily_report.get("enabled", False))
+    daily_report["push_time"] = normalize_clock_time(
+        daily_report.get("push_time"),
+        "08:30",
+    )
+    daily_report["channels"] = normalize_string_list(
+        daily_report.get("channels"),
+        ["dingtalk"],
+    )
+    daily_report["output_dir"] = str(
+        resolve_config_path(base_dir, daily_report.get("output_dir") or "./reports")
+    )
+    daily_report["report_export_dir"] = str(
+        daily_report.get("report_export_dir") or reports_config["report_export_dir"]
+    ).strip()
+    if daily_report["report_export_dir"]:
+        daily_report["report_export_dir"] = str(
+            resolve_config_path(base_dir, daily_report["report_export_dir"])
+        )
+    daily_report["public_base_url"] = str(daily_report.get("public_base_url") or "").strip()
+    if not daily_report["public_base_url"]:
+        daily_report["public_base_url"] = reports_config["public_base_url"]
+    daily_report["send_on_startup_if_missed"] = bool(
+        daily_report.get("send_on_startup_if_missed", False)
+    )
+
+    weekly_report = reports_config.setdefault("weekly", {})
+    weekly_report["enabled"] = bool(weekly_report.get("enabled", False))
+    weekly_report["push_weekday"] = min(
+        max(int(weekly_report.get("push_weekday", 1)), 1),
+        7,
+    )
+    weekly_report["push_time"] = normalize_clock_time(
+        weekly_report.get("push_time"),
+        "09:00",
+    )
+    weekly_report["channels"] = normalize_string_list(
+        weekly_report.get("channels"),
+        ["dingtalk"],
+    )
+    weekly_report["output_dir"] = str(
+        resolve_config_path(base_dir, weekly_report.get("output_dir") or "./reports")
+    )
+    weekly_report["report_export_dir"] = str(
+        weekly_report.get("report_export_dir") or reports_config["report_export_dir"]
+    ).strip()
+    if weekly_report["report_export_dir"]:
+        weekly_report["report_export_dir"] = str(
+            resolve_config_path(base_dir, weekly_report["report_export_dir"])
+        )
+    weekly_report["public_base_url"] = str(weekly_report.get("public_base_url") or "").strip()
+    if not weekly_report["public_base_url"]:
+        weekly_report["public_base_url"] = reports_config["public_base_url"]
+
+    monthly_report = reports_config.setdefault("monthly", {})
+    monthly_report["enabled"] = bool(monthly_report.get("enabled", False))
+    monthly_report["push_day"] = min(
+        max(int(monthly_report.get("push_day", 1)), 1),
+        28,
+    )
+    monthly_report["push_time"] = normalize_clock_time(
+        monthly_report.get("push_time"),
+        "09:30",
+    )
+    monthly_report["channels"] = normalize_string_list(
+        monthly_report.get("channels"),
+        ["dingtalk"],
+    )
+    monthly_report["output_dir"] = str(
+        resolve_config_path(base_dir, monthly_report.get("output_dir") or "./reports")
+    )
+    monthly_report["report_export_dir"] = str(
+        monthly_report.get("report_export_dir") or reports_config["report_export_dir"]
+    ).strip()
+    if monthly_report["report_export_dir"]:
+        monthly_report["report_export_dir"] = str(
+            resolve_config_path(base_dir, monthly_report["report_export_dir"])
+        )
+    monthly_report["public_base_url"] = str(monthly_report.get("public_base_url") or "").strip()
+    if not monthly_report["public_base_url"]:
+        monthly_report["public_base_url"] = reports_config["public_base_url"]
+
+    minimum_retention = max(
+        storage["rollup_minutes"]
+        + [
+            thresholds["summary_window_minutes"],
+            thresholds["hardware_window_minutes"],
+            thresholds["server_error_window_minutes"],
+        ]
+    ) + 10
+    agent["retention_minutes"] = max(agent["retention_minutes"], minimum_retention)
+    return config
+
+
+def load_config(path: Path) -> tuple[dict[str, Any], bool]:
+    generated = False
+    if not path.exists():
+        write_default_config(path)
+        generated = True
+
+    raw_text = path.read_text(encoding="utf-8-sig")
+    if yaml is not None:
+        loaded = yaml.safe_load(raw_text) or {}
+    else:
+        loaded = json.loads(raw_text)
+    if not isinstance(loaded, dict):
+        raise ValueError("Config file must contain a top-level mapping.")
+    config = normalize_config(deep_merge(DEFAULT_CONFIG, loaded), path)
+    return config, generated
+
+
+def load_state(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return copy.deepcopy(DEFAULT_STATE)
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return copy.deepcopy(DEFAULT_STATE)
+    if not isinstance(loaded, dict):
+        return copy.deepcopy(DEFAULT_STATE)
+    return deep_merge(DEFAULT_STATE, loaded)
+
+
+def save_state(path: Path, state: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    with temp_path.open("w", encoding="utf-8") as handle:
+        json.dump(state, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    temp_path.replace(path)
+
+
+def init_database(path: Path) -> sqlite3.Connection:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(path)
+    connection.executescript(SCHEMA_SQL)
+    connection.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS idx_metric_rollups_bucket
+        ON metric_rollups (host_id, site, bucket_minutes, bucket_start);
+
+        CREATE TABLE IF NOT EXISTS status_code_rollups (
+            rollup_id INTEGER NOT NULL,
+            status_code TEXT NOT NULL,
+            request_count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (rollup_id, status_code),
+            FOREIGN KEY (rollup_id) REFERENCES metric_rollups(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS spider_rollups (
+            rollup_id INTEGER NOT NULL,
+            spider_family TEXT NOT NULL,
+            request_count INTEGER NOT NULL DEFAULT 0,
+            bytes_out INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (rollup_id, spider_family),
+            FOREIGN KEY (rollup_id) REFERENCES metric_rollups(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS error_category_rollups (
+            rollup_id INTEGER NOT NULL,
+            category TEXT NOT NULL,
+            error_count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (rollup_id, category),
+            FOREIGN KEY (rollup_id) REFERENCES metric_rollups(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS error_fingerprint_rollups (
+            rollup_id INTEGER NOT NULL,
+            fingerprint TEXT NOT NULL,
+            error_count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (rollup_id, fingerprint),
+            FOREIGN KEY (rollup_id) REFERENCES metric_rollups(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS uri_rollups (
+            rollup_id INTEGER NOT NULL,
+            uri TEXT NOT NULL,
+            request_count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (rollup_id, uri),
+            FOREIGN KEY (rollup_id) REFERENCES metric_rollups(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS uri_detail_rollups (
+            rollup_id INTEGER NOT NULL,
+            uri TEXT NOT NULL,
+            request_count INTEGER NOT NULL DEFAULT 0,
+            uv_count INTEGER NOT NULL DEFAULT 0,
+            bytes_out INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (rollup_id, uri),
+            FOREIGN KEY (rollup_id) REFERENCES metric_rollups(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS source_rollups (
+            rollup_id INTEGER NOT NULL,
+            source_name TEXT NOT NULL,
+            request_count INTEGER NOT NULL DEFAULT 0,
+            uv_count INTEGER NOT NULL DEFAULT 0,
+            bytes_out INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (rollup_id, source_name),
+            FOREIGN KEY (rollup_id) REFERENCES metric_rollups(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS visitor_rollups (
+            rollup_id INTEGER NOT NULL,
+            visitor_hash TEXT NOT NULL,
+            PRIMARY KEY (rollup_id, visitor_hash),
+            FOREIGN KEY (rollup_id) REFERENCES metric_rollups(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS client_ip_rollups (
+            rollup_id INTEGER NOT NULL,
+            client_ip TEXT NOT NULL,
+            PRIMARY KEY (rollup_id, client_ip),
+            FOREIGN KEY (rollup_id) REFERENCES metric_rollups(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS client_ip_request_rollups (
+            rollup_id INTEGER NOT NULL,
+            client_ip TEXT NOT NULL,
+            request_count INTEGER NOT NULL DEFAULT 0,
+            bytes_out INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (rollup_id, client_ip),
+            FOREIGN KEY (rollup_id) REFERENCES metric_rollups(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS client_family_rollups (
+            rollup_id INTEGER NOT NULL,
+            client_family TEXT NOT NULL,
+            request_count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (rollup_id, client_family),
+            FOREIGN KEY (rollup_id) REFERENCES metric_rollups(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS slow_request_rollups (
+            rollup_id INTEGER NOT NULL,
+            uri TEXT NOT NULL,
+            slow_request_count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (rollup_id, uri),
+            FOREIGN KEY (rollup_id) REFERENCES metric_rollups(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS suspicious_ip_rollups (
+            rollup_id INTEGER NOT NULL,
+            client_ip TEXT NOT NULL,
+            max_requests_per_minute INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (rollup_id, client_ip),
+            FOREIGN KEY (rollup_id) REFERENCES metric_rollups(id) ON DELETE CASCADE
+        );
+        """
+    )
+    return connection
+
+
+def get_timezone(config: dict[str, Any]) -> dt.tzinfo:
+    timezone_name = config["agent"].get("timezone", "UTC")
+    if ZoneInfo is None:
+        return dt.timezone.utc
+    try:
+        return ZoneInfo(timezone_name)
+    except Exception:
+        return dt.timezone.utc
+
+
+def parse_iso_ts(value: Any) -> dt.datetime | None:
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed
+
+
+def event_timestamp(event: dict[str, Any]) -> dt.datetime | None:
+    timestamp = event.get("timestamp")
+    if isinstance(timestamp, dt.datetime):
+        return timestamp
+    return parse_iso_ts(event.get("ts"))
+
+
+def read_tail_lines(path: Path | None, max_lines: int) -> list[str]:
+    if not path or not path.exists() or max_lines <= 0:
+        return []
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        return list(collections.deque(handle, maxlen=max_lines))
+
+
+def read_incremental_lines(
+    path: Path,
+    cursor: dict[str, Any] | None,
+    startup_mode: str,
+    bootstrap_tail_lines: int,
+) -> tuple[list[str], dict[str, Any]]:
+    if not path.exists():
+        return [], {"offset": 0, "inode": None, "path": str(path)}
+
+    inode = getattr(path.stat(), "st_ino", None)
+    if not cursor or cursor.get("path") != str(path):
+        if startup_mode == "full":
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                lines = handle.readlines()
+                offset = handle.tell()
+        else:
+            lines = read_tail_lines(path, bootstrap_tail_lines)
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                handle.seek(0, 2)
+                offset = handle.tell()
+        return lines, {"offset": offset, "inode": inode, "path": str(path)}
+
+    previous_offset = int(cursor.get("offset", 0))
+    previous_inode = cursor.get("inode")
+    stat = path.stat()
+    if previous_inode != inode or stat.st_size < previous_offset:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            lines = handle.readlines()
+            offset = handle.tell()
+        return lines, {"offset": offset, "inode": inode, "path": str(path)}
+
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        handle.seek(previous_offset)
+        lines = handle.readlines()
+        offset = handle.tell()
+    return lines, {"offset": offset, "inode": inode, "path": str(path)}
+
+
+def parse_access_timestamp(raw: str, default_timezone: dt.tzinfo) -> dt.datetime | None:
+    formats = ["%d/%b/%Y:%H:%M:%S %z", "%d/%b/%Y:%H:%M:%S"]
+    for fmt in formats:
+        try:
+            parsed = dt.datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=default_timezone).astimezone(dt.timezone.utc)
+        return parsed.astimezone(dt.timezone.utc)
+    return None
+
+
+def parse_error_timestamp(raw: str, default_timezone: dt.tzinfo) -> dt.datetime | None:
+    formats = [
+        "%Y/%m/%d %H:%M:%S",
+        "%a %b %d %H:%M:%S.%f %Y",
+        "%a %b %d %H:%M:%S %Y",
+    ]
+    for fmt in formats:
+        try:
+            parsed = dt.datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+        return parsed.replace(tzinfo=default_timezone).astimezone(dt.timezone.utc)
+    return None
+
+
+def parse_request(request: str) -> tuple[str | None, str | None, str | None]:
+    if not request or request == "-":
+        return None, None, None
+    parts = request.split()
+    if len(parts) >= 3:
+        return parts[0], parts[1], parts[2]
+    if len(parts) == 2:
+        return parts[0], parts[1], None
+    return None, request, None
+
+
+def looks_number(value: str) -> bool:
+    try:
+        float(value)
+    except ValueError:
+        return False
+    return True
+
+
+def parse_tail_tokens(tail: str | None) -> dict[str, Any]:
+    data: dict[str, Any] = {"request_time_s": None, "request_length": None}
+    if not tail:
+        return data
+    try:
+        tokens = shlex.split(tail)
+    except ValueError:
+        tokens = tail.split()
+    numeric_tokens = [token for token in tokens if looks_number(token)]
+    float_tokens = [token for token in numeric_tokens if "." in token]
+    int_tokens = [token for token in numeric_tokens if token.isdigit()]
+    if float_tokens:
+        data["request_time_s"] = float(float_tokens[0])
+    elif len(int_tokens) == 1:
+        candidate = int(int_tokens[0])
+        if candidate <= 60:
+            data["request_time_s"] = float(candidate)
+    if int_tokens:
+        candidate = max(int(token) for token in int_tokens)
+        if candidate > 60:
+            data["request_length"] = candidate
+    return data
+
+
+def to_int(value: str) -> int | None:
+    if not value or value == "-":
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def classify_source(referer: str, site_host: str) -> tuple[str, str]:
+    if not referer or referer == "-":
+        return "direct", "direct"
+    parsed = urlparse(referer)
+    host = (parsed.netloc or "").lower()
+    if not host:
+        return "external", "unknown"
+    if site_host and host.endswith(site_host.lower()):
+        return "internal", host
+    for needle, name in SEARCH_HOSTS.items():
+        if needle in host:
+            return "search", name
+    return "external", host
+
+
+def classify_spider(user_agent: str) -> str | None:
+    for pattern, family in SPIDER_PATTERNS:
+        if pattern.search(user_agent or ""):
+            return family
+    return None
+
+
+def classify_client_family(user_agent: str, spider_family: str | None = None) -> str:
+    if spider_family in {"scanner", "cli-client"}:
+        return "Automation"
+    if spider_family:
+        return "Crawler"
+    for pattern, family in CLIENT_FAMILY_PATTERNS:
+        if pattern.search(user_agent or ""):
+            return family
+    return "Other"
+
+
+def classify_error(message: str) -> str:
+    lowered = message.lower()
+    for category, needles in ERROR_RULES:
+        if all(needle in lowered for needle in needles):
+            return category
+    return "other"
+
+
+def normalize_error_message(message: str) -> str:
+    normalized = IP_RE.sub("<ip>", message.lower())
+    normalized = re.sub(r"\b\d+\b", "<n>", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized[:240]
+
+
+def visitor_hash(client_ip: str | None, user_agent: str | None) -> str:
+    base = f"{client_ip or '-'}|{user_agent or '-'}"
+    return hashlib.sha1(base.encode("utf-8")).hexdigest()
+
+
+def parse_access_line(
+    line: str,
+    host_id: str,
+    site: str,
+    site_host: str,
+    default_timezone: dt.tzinfo,
+) -> dict[str, Any] | None:
+    match = ACCESS_RE.match(line.lstrip("\ufeff").strip())
+    if not match:
+        return None
+    method, uri, protocol = parse_request(match.group("request"))
+    timestamp = parse_access_timestamp(match.group("timestamp"), default_timezone)
+    tail = parse_tail_tokens(match.group("tail"))
+    source_channel, source_name = classify_source(match.group("referer"), site_host)
+    user_agent = match.group("user_agent")
+    return {
+        "event_type": "access_event",
+        "host_id": host_id,
+        "site": site,
+        "ts": timestamp.isoformat() if timestamp else None,
+        "timestamp": timestamp,
+        "client_ip": match.group("client_ip"),
+        "method": method,
+        "uri": uri,
+        "protocol": protocol,
+        "status": int(match.group("status")),
+        "bytes_out": to_int(match.group("body_bytes_sent")),
+        "bytes_in": tail["request_length"],
+        "response_ms": (
+            round(float(tail["request_time_s"]) * 1000.0, 2)
+            if tail["request_time_s"] is not None
+            else None
+        ),
+        "referer": match.group("referer"),
+        "source_channel": source_channel,
+        "source_name": source_name,
+        "user_agent": user_agent,
+        "spider_family": classify_spider(user_agent),
+        "raw": line.rstrip("\n"),
+    }
+
+
+def parse_error_line(
+    line: str,
+    host_id: str,
+    site: str,
+    default_timezone: dt.tzinfo,
+) -> dict[str, Any] | None:
+    stripped = line.lstrip("\ufeff").strip()
+    nginx_match = NGINX_ERROR_RE.match(stripped)
+    if nginx_match:
+        timestamp = parse_error_timestamp(nginx_match.group("timestamp"), default_timezone)
+        message = nginx_match.group("message")
+        client_match = re.search(r"client: (?P<client>\S+)", message)
+        request_match = re.search(r'request: "(?P<request>[^"]+)"', message)
+        method, uri, _protocol = (
+            parse_request(request_match.group("request"))
+            if request_match
+            else (None, None, None)
+        )
+        category = classify_error(message)
+        fingerprint = f"{category}:{normalize_error_message(message)}"
+        return {
+            "event_type": "error_event",
+            "host_id": host_id,
+            "site": site,
+            "ts": timestamp.isoformat() if timestamp else None,
+            "timestamp": timestamp,
+            "component": "nginx",
+            "severity": nginx_match.group("level"),
+            "category": category,
+            "fingerprint": fingerprint,
+            "client_ip": client_match.group("client") if client_match else None,
+            "method": method,
+            "uri": uri,
+            "message": message,
+            "raw": line.rstrip("\n"),
+        }
+
+    apache_match = APACHE_ERROR_RE.match(stripped)
+    if not apache_match:
+        return None
+    timestamp = parse_error_timestamp(apache_match.group("timestamp"), default_timezone)
+    client_raw = apache_match.group("client") or ""
+    client_match = IP_RE.search(client_raw)
+    message = apache_match.group("message")
+    category = classify_error(message)
+    fingerprint = f"{category}:{normalize_error_message(message)}"
+    return {
+        "event_type": "error_event",
+        "host_id": host_id,
+        "site": site,
+        "ts": timestamp.isoformat() if timestamp else None,
+        "timestamp": timestamp,
+        "component": "apache",
+        "severity": apache_match.group("module"),
+        "category": category,
+        "fingerprint": fingerprint,
+        "client_ip": client_match.group(0) if client_match else None,
+        "method": None,
+        "uri": None,
+        "message": message,
+        "raw": line.rstrip("\n"),
+    }
+
+
+def serialize_events(events: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    serialized = []
+    for event in events:
+        cloned = dict(event)
+        timestamp = cloned.pop("timestamp", None)
+        if isinstance(timestamp, dt.datetime):
+            cloned["ts"] = timestamp.isoformat()
+        serialized.append(cloned)
+    return serialized
+
+
+def prune_history(state: dict[str, Any], config: dict[str, Any], now: dt.datetime) -> None:
+    retention_minutes = config["agent"]["retention_minutes"]
+    max_events = config["agent"]["max_buffer_events"]
+    cutoff = now - dt.timedelta(minutes=retention_minutes)
+
+    for key in ("access_events", "error_events", "system_snapshots"):
+        items = state["history"].get(key, [])
+        trimmed = []
+        for item in items:
+            timestamp = parse_iso_ts(item.get("ts"))
+            if timestamp and timestamp >= cutoff:
+                trimmed.append(item)
+        if key != "system_snapshots" and len(trimmed) > max_events:
+            trimmed = trimmed[-max_events:]
+        state["history"][key] = trimmed
+
+
+def filter_window(
+    events: list[dict[str, Any]],
+    window_start: dt.datetime,
+    window_end: dt.datetime,
+) -> list[dict[str, Any]]:
+    filtered = []
+    for event in events:
+        timestamp = event_timestamp(event)
+        if timestamp is None:
+            continue
+        if window_start <= timestamp < window_end:
+            filtered.append(event)
+    return filtered
+
+
+def summarize_access_window(
+    events: list[dict[str, Any]],
+    window_start: dt.datetime,
+    window_end: dt.datetime,
+    slow_ms: float,
+    attack_rpm_threshold: int,
+) -> dict[str, Any]:
+    window_events = filter_window(events, window_start, window_end)
+    if not window_events:
+        return {
+            "window_start": window_start.isoformat(),
+            "window_end": window_end.isoformat(),
+            "total_requests": 0,
+            "active_users_10m": 0,
+            "pv": 0,
+            "uv": 0,
+            "unique_ips": 0,
+            "qps": 0.0,
+            "avg_response_ms": None,
+            "slow_request_count": 0,
+            "slow_request_top_uris": [],
+            "status_families": {},
+            "status_codes": {},
+            "top_uris": [],
+            "top_sources": [],
+            "uri_stats": [],
+            "source_stats": [],
+            "spiders": [],
+            "suspicious_ips": [],
+            "client_ip_stats": [],
+            "client_families": [],
+            "bandwidth_out_bytes": 0,
+            "bandwidth_in_bytes": None,
+            "bandwidth_in_coverage": 0.0,
+            "visitor_hashes": [],
+            "client_ips": [],
+        }
+
+    visitor_keys = {
+        f"{event['client_ip']}|{event['user_agent']}" for event in window_events
+    }
+    visitor_hashes = {
+        visitor_hash(event.get("client_ip"), event.get("user_agent"))
+        for event in window_events
+    }
+    client_ips = sorted(
+        {str(event["client_ip"]) for event in window_events if event.get("client_ip")}
+    )
+    response_values = [
+        event["response_ms"]
+        for event in window_events
+        if event.get("response_ms") is not None
+    ]
+    status_codes = collections.Counter(str(event["status"]) for event in window_events)
+    status_families = collections.Counter(
+        f"{int(event['status']) // 100}xx" for event in window_events
+    )
+    top_uris = collections.Counter(event["uri"] or "-" for event in window_events).most_common(10)
+    top_sources = collections.Counter(
+        str(event["source_name"]) for event in window_events
+    ).most_common(10)
+    uri_request_counts: collections.Counter[str] = collections.Counter()
+    uri_bytes_out: collections.Counter[str] = collections.Counter()
+    uri_visitors: dict[str, set[str]] = collections.defaultdict(set)
+    source_request_counts: collections.Counter[str] = collections.Counter()
+    source_bytes_out: collections.Counter[str] = collections.Counter()
+    source_visitors: dict[str, set[str]] = collections.defaultdict(set)
+    client_ip_request_counts: collections.Counter[str] = collections.Counter()
+    client_ip_bytes_out: collections.Counter[str] = collections.Counter()
+    client_family_counts: collections.Counter[str] = collections.Counter()
+
+    spider_counter: collections.Counter[str] = collections.Counter()
+    spider_bytes: collections.Counter[str] = collections.Counter()
+    for event in window_events:
+        spider = event.get("spider_family")
+        uri = str(event.get("uri") or "-")
+        source_name = str(event.get("source_name") or "direct")
+        client_ip = str(event.get("client_ip") or "-")
+        visitor_digest = visitor_hash(event.get("client_ip"), event.get("user_agent"))
+        bytes_out = int(event.get("bytes_out") or 0)
+        uri_request_counts[uri] += 1
+        uri_bytes_out[uri] += bytes_out
+        uri_visitors[uri].add(visitor_digest)
+        source_request_counts[source_name] += 1
+        source_bytes_out[source_name] += bytes_out
+        source_visitors[source_name].add(visitor_digest)
+        if client_ip and client_ip != "-":
+            client_ip_request_counts[client_ip] += 1
+            client_ip_bytes_out[client_ip] += bytes_out
+        client_family_counts[
+            classify_client_family(str(event.get("user_agent") or ""), spider)
+        ] += 1
+        if spider:
+            spider_counter[spider] += 1
+            spider_bytes[spider] += bytes_out
+
+    per_ip_per_minute: dict[str, collections.Counter[str]] = collections.defaultdict(
+        collections.Counter
+    )
+    for event in window_events:
+        timestamp = event_timestamp(event)
+        if timestamp is None:
+            continue
+        bucket = timestamp.replace(second=0, microsecond=0).isoformat()
+        per_ip_per_minute[str(event["client_ip"])][bucket] += 1
+    suspicious_ips = []
+    for ip, buckets in per_ip_per_minute.items():
+        max_rpm = max(buckets.values()) if buckets else 0
+        if max_rpm >= attack_rpm_threshold:
+            suspicious_ips.append({"ip": ip, "max_requests_per_minute": max_rpm})
+    suspicious_ips.sort(key=lambda item: item["max_requests_per_minute"], reverse=True)
+
+    duration_seconds = max(int((window_end - window_start).total_seconds()), 1)
+    slow_counts = collections.Counter(
+        event["uri"] or "-"
+        for event in window_events
+        if event.get("response_ms") is not None and event["response_ms"] >= slow_ms
+    )
+    bytes_in_values = [
+        int(event["bytes_in"]) for event in window_events if event.get("bytes_in") is not None
+    ]
+    bandwidth_in = sum(bytes_in_values) if bytes_in_values else None
+    coverage = round(len(bytes_in_values) / len(window_events), 4)
+
+    return {
+        "window_start": window_start.isoformat(),
+        "window_end": window_end.isoformat(),
+        "total_requests": len(window_events),
+        "active_users_10m": len(visitor_keys),
+        "pv": len(window_events),
+        "uv": len(visitor_keys),
+        "unique_ips": len({event["client_ip"] for event in window_events}),
+        "qps": round(len(window_events) / duration_seconds, 4),
+        "avg_response_ms": (
+            round(statistics.mean(response_values), 2) if response_values else None
+        ),
+        "slow_request_count": sum(slow_counts.values()),
+        "slow_request_top_uris": [
+            {"uri": uri, "count": count} for uri, count in slow_counts.most_common(10)
+        ],
+        "status_families": dict(status_families),
+        "status_codes": dict(status_codes),
+        "top_uris": [{"uri": uri, "count": count} for uri, count in top_uris],
+        "top_sources": [{"source": source, "count": count} for source, count in top_sources],
+        "uri_stats": [
+            {
+                "uri": uri,
+                "count": count,
+                "uv_count": len(uri_visitors[uri]),
+                "bytes_out": int(uri_bytes_out[uri]),
+            }
+            for uri, count in uri_request_counts.most_common(20)
+        ],
+        "source_stats": [
+            {
+                "source": source,
+                "count": count,
+                "uv_count": len(source_visitors[source]),
+                "bytes_out": int(source_bytes_out[source]),
+            }
+            for source, count in source_request_counts.most_common(20)
+        ],
+        "spiders": [
+            {
+                "family": family,
+                "requests": spider_counter[family],
+                "bytes_out": spider_bytes[family],
+            }
+            for family, _count in spider_counter.most_common()
+        ],
+        "suspicious_ips": suspicious_ips[:10],
+        "client_ip_stats": [
+            {
+                "ip": client_ip,
+                "count": count,
+                "bytes_out": int(client_ip_bytes_out[client_ip]),
+            }
+            for client_ip, count in client_ip_request_counts.most_common(20)
+        ],
+        "client_families": [
+            {"family": family, "count": count}
+            for family, count in client_family_counts.most_common(20)
+        ],
+        "bandwidth_out_bytes": sum(int(event.get("bytes_out") or 0) for event in window_events),
+        "bandwidth_in_bytes": bandwidth_in,
+        "bandwidth_in_coverage": coverage,
+        "visitor_hashes": sorted(visitor_hashes),
+        "client_ips": client_ips,
+    }
+
+
+def summarize_errors_window(
+    events: list[dict[str, Any]],
+    window_start: dt.datetime,
+    window_end: dt.datetime,
+) -> dict[str, Any]:
+    window_events = filter_window(events, window_start, window_end)
+    if not window_events:
+        return {
+            "window_start": window_start.isoformat(),
+            "window_end": window_end.isoformat(),
+            "total_errors": 0,
+            "categories": {},
+            "top_fingerprints": [],
+        }
+    categories = collections.Counter(str(event["category"]) for event in window_events)
+    fingerprints = collections.Counter(str(event["fingerprint"]) for event in window_events)
+    return {
+        "window_start": window_start.isoformat(),
+        "window_end": window_end.isoformat(),
+        "total_errors": len(window_events),
+        "categories": dict(categories),
+        "top_fingerprints": [
+            {"fingerprint": fingerprint, "count": count}
+            for fingerprint, count in fingerprints.most_common(10)
+        ],
+    }
+
+
+def summarize_system_snapshots_window(
+    snapshots: list[dict[str, Any]],
+    window_start: dt.datetime,
+    window_end: dt.datetime,
+) -> dict[str, Any]:
+    window_snapshots = filter_window(snapshots, window_start, window_end)
+    if not window_snapshots:
+        return {
+            "window_start": window_start.isoformat(),
+            "window_end": window_end.isoformat(),
+            "avg_cpu_pct": None,
+            "max_cpu_pct": None,
+            "avg_memory_pct": None,
+            "max_memory_pct": None,
+            "min_disk_free_bytes": None,
+        }
+
+    cpu_values = [
+        float(snapshot["cpu_pct"])
+        for snapshot in window_snapshots
+        if snapshot.get("cpu_pct") is not None
+    ]
+    memory_values = [
+        float(snapshot["memory_pct"])
+        for snapshot in window_snapshots
+        if snapshot.get("memory_pct") is not None
+    ]
+    disk_values = [
+        int(snapshot["disk_free_bytes"])
+        for snapshot in window_snapshots
+        if snapshot.get("disk_free_bytes") is not None
+    ]
+
+    return {
+        "window_start": window_start.isoformat(),
+        "window_end": window_end.isoformat(),
+        "avg_cpu_pct": round(statistics.mean(cpu_values), 2) if cpu_values else None,
+        "max_cpu_pct": round(max(cpu_values), 2) if cpu_values else None,
+        "avg_memory_pct": round(statistics.mean(memory_values), 2) if memory_values else None,
+        "max_memory_pct": round(max(memory_values), 2) if memory_values else None,
+        "min_disk_free_bytes": min(disk_values) if disk_values else None,
+    }
+
+
+def collect_system_snapshot(
+    disk_root: str,
+    host_id: str,
+    site: str,
+) -> dict[str, Any]:
+    snapshot = {
+        "event_type": "system_snapshot",
+        "host_id": host_id,
+        "site": site,
+        "ts": utcnow().isoformat(),
+        "metrics_available": psutil is not None,
+    }
+    if psutil is None:
+        snapshot["warning"] = "psutil is not installed; system metrics are unavailable."
+        return snapshot
+
+    cpu_pct = psutil.cpu_percent(interval=0.1)
+    memory = psutil.virtual_memory()
+    disk = psutil.disk_usage(disk_root)
+    net = psutil.net_io_counters()
+    snapshot.update(
+        {
+            "cpu_pct": round(cpu_pct, 2),
+            "memory_pct": round(memory.percent, 2),
+            "disk_used_pct": round(disk.percent, 2),
+            "disk_free_bytes": int(disk.free),
+            "net_rx_bytes": int(net.bytes_recv),
+            "net_tx_bytes": int(net.bytes_sent),
+        }
+    )
+    try:
+        load_1m, load_5m, load_15m = psutil.getloadavg()
+    except (AttributeError, OSError):
+        load_1m = load_5m = load_15m = None
+    snapshot.update(
+        {
+            "load_1m": load_1m,
+            "load_5m": load_5m,
+            "load_15m": load_15m,
+        }
+    )
+    return snapshot
+
+
+def evaluate_alerts(
+    system_snapshot: dict[str, Any],
+    access_summary: dict[str, Any],
+    error_summary: dict[str, Any],
+    thresholds: dict[str, Any],
+) -> list[dict[str, Any]]:
+    alerts: list[dict[str, Any]] = []
+
+    cpu_pct = system_snapshot.get("cpu_pct")
+    memory_pct = system_snapshot.get("memory_pct")
+    disk_free_bytes = system_snapshot.get("disk_free_bytes")
+    disk_used_pct = system_snapshot.get("disk_used_pct")
+
+    if isinstance(cpu_pct, (int, float)) and cpu_pct > thresholds["cpu_pct"]:
+        alerts.append({"kind": "cpu_high", "severity": "warning", "value": cpu_pct})
+    if isinstance(memory_pct, (int, float)) and memory_pct > thresholds["memory_pct"]:
+        alerts.append({"kind": "memory_high", "severity": "warning", "value": memory_pct})
+    if (
+        isinstance(disk_free_bytes, int)
+        and isinstance(disk_used_pct, (int, float))
+        and (1.0 - (float(disk_used_pct) / 100.0)) < thresholds["disk_free_ratio"]
+    ):
+        alerts.append({"kind": "disk_low", "severity": "critical", "value": disk_free_bytes})
+
+    five_xx = sum(
+        count
+        for code, count in access_summary.get("status_codes", {}).items()
+        if code in {"500", "502", "504"}
+    )
+    if five_xx > thresholds["server_error_count"]:
+        alerts.append({"kind": "server_error_burst", "severity": "critical", "count": five_xx})
+
+    suspicious_ips = access_summary.get("suspicious_ips", [])
+    if suspicious_ips:
+        alerts.append(
+            {
+                "kind": "suspicious_ip_burst",
+                "severity": "critical",
+                "top_ip": suspicious_ips[0]["ip"],
+                "top_rpm": suspicious_ips[0]["max_requests_per_minute"],
+            }
+        )
+
+    four_oh_four = int(access_summary.get("status_codes", {}).get("404", 0))
+    if four_oh_four >= thresholds["scan_404_count"]:
+        alerts.append(
+            {"kind": "scan_or_route_breakage", "severity": "warning", "count": four_oh_four}
+        )
+
+    avg_response_ms = access_summary.get("avg_response_ms")
+    if isinstance(avg_response_ms, (int, float)) and avg_response_ms > thresholds["slow_ms"]:
+        alerts.append(
+            {
+                "kind": "latency_degradation",
+                "severity": "critical",
+                "avg_response_ms": avg_response_ms,
+            }
+        )
+
+    if error_summary.get("categories", {}).get("primary_script_unknown"):
+        alerts.append({"kind": "php_entrypoint_error", "severity": "warning"})
+
+    return alerts
+
+
+def severity_value(name: str) -> int:
+    return SEVERITY_RANK.get(str(name or "").lower(), 0)
+
+
+def format_human_bytes(num_bytes: int | None) -> str:
+    if num_bytes is None:
+        return "N/A"
+    value = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(value) < 1024.0 or unit == "TB":
+            return f"{value:.2f} {unit}"
+        value /= 1024.0
+    return f"{value:.2f} TB"
+
+
+def alert_cooldown_key(config: dict[str, Any], alert: dict[str, Any]) -> str:
+    site = config["agent"]["site"]
+    host_id = config["agent"]["host_id"]
+    parts = [host_id, site, str(alert.get("kind") or "unknown")]
+    if alert.get("kind") == "suspicious_ip_burst":
+        parts.append(str(alert.get("top_ip") or "-"))
+    return ":".join(parts)
+
+
+def alert_label(alert: dict[str, Any]) -> str:
+    labels = {
+        "cpu_high": "CPU 使用率过高",
+        "memory_high": "内存使用率过高",
+        "disk_low": "磁盘剩余空间不足",
+        "server_error_burst": "5xx 错误突增",
+        "suspicious_ip_burst": "疑似高频攻击",
+        "scan_or_route_breakage": "404 扫描或路由异常",
+        "latency_degradation": "接口性能劣化",
+        "php_entrypoint_error": "PHP 入口脚本异常",
+    }
+    return labels.get(str(alert.get("kind")), str(alert.get("kind") or "unknown_alert"))
+
+
+def alert_suggestion(alert: dict[str, Any]) -> str:
+    suggestions = {
+        "cpu_high": "检查高负载进程、慢 SQL 或异常爬虫流量。",
+        "memory_high": "检查 PHP-FPM、数据库缓存或大对象泄漏情况。",
+        "disk_low": "清理日志/备份目录，并确认是否需要扩容。",
+        "server_error_burst": "优先检查 Nginx upstream、PHP-FPM 与最近发布变更。",
+        "suspicious_ip_burst": "确认是否为 CC/扫描流量，必要时执行临时封禁。",
+        "scan_or_route_breakage": "检查最近路由变更、静态资源发布或扫描器访问。",
+        "latency_degradation": "查看慢请求 URI、上游依赖与数据库响应时间。",
+        "php_entrypoint_error": "检查站点根目录、伪静态与 PHP 文件权限。",
+    }
+    return suggestions.get(str(alert.get("kind")), "请结合最近日志与服务状态继续排查。")
+
+
+def render_alert_markdown(
+    config: dict[str, Any],
+    alert: dict[str, Any],
+    generated_at: dt.datetime,
+    system_snapshot: dict[str, Any],
+    access_summary: dict[str, Any],
+    error_summary: dict[str, Any],
+) -> str:
+    site = config["agent"]["site"]
+    host_id = config["agent"]["host_id"]
+    timezone = get_timezone(config)
+    timestamp_local = generated_at.astimezone(timezone).isoformat()
+    top_uri = (
+        access_summary.get("top_uris", [{}])[0].get("uri")
+        if access_summary.get("top_uris")
+        else None
+    )
+    top_error = (
+        error_summary.get("top_fingerprints", [{}])[0].get("fingerprint")
+        if error_summary.get("top_fingerprints")
+        else None
+    )
+    detail_lines = []
+    if alert["kind"] == "cpu_high":
+        detail_lines.append(f"- CPU: {system_snapshot.get('cpu_pct')}%")
+    elif alert["kind"] == "memory_high":
+        detail_lines.append(f"- 内存: {system_snapshot.get('memory_pct')}%")
+    elif alert["kind"] == "disk_low":
+        detail_lines.append(
+            f"- 剩余磁盘: {format_human_bytes(system_snapshot.get('disk_free_bytes'))}"
+        )
+    elif alert["kind"] == "server_error_burst":
+        detail_lines.append(f"- 近窗口 5xx 次数: {alert.get('count', 0)}")
+    elif alert["kind"] == "suspicious_ip_burst":
+        detail_lines.append(
+            f"- 高频 IP: `{alert.get('top_ip')}` ({alert.get('top_rpm')} req/min)"
+        )
+    elif alert["kind"] == "scan_or_route_breakage":
+        detail_lines.append(f"- 404 次数: {alert.get('count', 0)}")
+    elif alert["kind"] == "latency_degradation":
+        detail_lines.append(
+            f"- 平均响应: {alert.get('avg_response_ms')} ms"
+        )
+
+    if top_uri and top_uri != "-":
+        detail_lines.append(f"- 热点 URI: `{top_uri}`")
+    if top_error:
+        detail_lines.append(f"- 主要错误指纹: `{top_error}`")
+    detail_lines.append(f"- 建议动作: {alert_suggestion(alert)}")
+
+    lines = [
+        f"# Server-Mate 告警 | {alert_label(alert)}",
+        "",
+        f"- 级别: `{str(alert.get('severity', 'warning')).upper()}`",
+        f"- 主机: `{host_id}`",
+        f"- 站点: `{site}`",
+        f"- 触发时间: {timestamp_local}",
+        f"- 当前窗口请求数: {access_summary.get('total_requests', 0)}",
+        f"- 当前窗口错误数: {error_summary.get('total_errors', 0)}",
+    ]
+    lines.extend(detail_lines)
+    return "\n".join(lines)
+
+
+def deliver_alerts(
+    config: dict[str, Any],
+    state: dict[str, Any],
+    generated_at: dt.datetime,
+    alerts: list[dict[str, Any]],
+    system_snapshot: dict[str, Any],
+    access_summary: dict[str, Any],
+    error_summary: dict[str, Any],
+) -> list[dict[str, Any]]:
+    alerts_config = config.get("notifications", {}).get("alerts", {})
+    if not alerts_config.get("enabled", True):
+        return []
+
+    minimum_severity = str(alerts_config.get("minimum_severity", "warning")).lower()
+    channels = alerts_config.get("channels", [])
+    cooldown_seconds = int(alerts_config.get("cooldown_seconds", 300))
+    delivery_state = state.setdefault("delivery", {}).setdefault("alert_cooldowns", {})
+
+    results = []
+    for alert in alerts:
+        if severity_value(alert.get("severity", "warning")) < severity_value(minimum_severity):
+            continue
+
+        cooldown_key = alert_cooldown_key(config, alert)
+        last_sent = parse_iso_ts(delivery_state.get(cooldown_key))
+        if last_sent is not None and cooldown_seconds > 0:
+            elapsed = (generated_at - last_sent).total_seconds()
+            if elapsed < cooldown_seconds:
+                results.append(
+                    {
+                        "kind": alert["kind"],
+                        "severity": alert["severity"],
+                        "skipped": True,
+                        "reason": "cooldown",
+                        "cooldown_key": cooldown_key,
+                        "cooldown_remaining_seconds": int(cooldown_seconds - elapsed),
+                    }
+                )
+                continue
+
+        title = f"Server-Mate 告警 | {config['agent']['site']} | {alert_label(alert)}"
+        markdown = render_alert_markdown(
+            config,
+            alert,
+            generated_at,
+            system_snapshot,
+            access_summary,
+            error_summary,
+        )
+        channel_results = send_markdown_message(config, title, markdown, channels)
+        success = any(result.get("success") for result in channel_results)
+        if success:
+            delivery_state[cooldown_key] = generated_at.isoformat()
+        results.append(
+            {
+                "kind": alert["kind"],
+                "severity": alert["severity"],
+                "success": success,
+                "cooldown_key": cooldown_key,
+                "channels": channel_results,
+            }
+        )
+    return results
+
+
+def floor_bucket(timestamp: dt.datetime, bucket_minutes: int, timezone: dt.tzinfo) -> dt.datetime:
+    local_timestamp = timestamp.astimezone(timezone)
+    minute = (local_timestamp.minute // bucket_minutes) * bucket_minutes
+    return local_timestamp.replace(minute=minute, second=0, microsecond=0)
+
+
+def iter_closed_buckets(
+    timestamps: list[dt.datetime],
+    now: dt.datetime,
+    bucket_minutes: int,
+    timezone: dt.tzinfo,
+) -> list[tuple[dt.datetime, dt.datetime]]:
+    if not timestamps:
+        return []
+    earliest = floor_bucket(min(timestamps), bucket_minutes, timezone)
+    current_open_bucket = floor_bucket(now, bucket_minutes, timezone)
+    buckets = []
+    cursor = earliest
+    delta = dt.timedelta(minutes=bucket_minutes)
+    while cursor < current_open_bucket:
+        buckets.append(
+            (
+                cursor.astimezone(dt.timezone.utc),
+                (cursor + delta).astimezone(dt.timezone.utc),
+            )
+        )
+        cursor += delta
+    return buckets
+
+
+def rewrite_rollup_details(
+    connection: sqlite3.Connection,
+    rollup_id: int,
+    access_summary: dict[str, Any],
+    error_summary: dict[str, Any],
+) -> None:
+    connection.execute("DELETE FROM status_code_rollups WHERE rollup_id = ?", (rollup_id,))
+    connection.execute("DELETE FROM spider_rollups WHERE rollup_id = ?", (rollup_id,))
+    connection.execute("DELETE FROM error_category_rollups WHERE rollup_id = ?", (rollup_id,))
+    connection.execute("DELETE FROM error_fingerprint_rollups WHERE rollup_id = ?", (rollup_id,))
+    connection.execute("DELETE FROM uri_rollups WHERE rollup_id = ?", (rollup_id,))
+    connection.execute("DELETE FROM uri_detail_rollups WHERE rollup_id = ?", (rollup_id,))
+    connection.execute("DELETE FROM source_rollups WHERE rollup_id = ?", (rollup_id,))
+    connection.execute("DELETE FROM visitor_rollups WHERE rollup_id = ?", (rollup_id,))
+    connection.execute("DELETE FROM client_ip_rollups WHERE rollup_id = ?", (rollup_id,))
+    connection.execute("DELETE FROM client_ip_request_rollups WHERE rollup_id = ?", (rollup_id,))
+    connection.execute("DELETE FROM client_family_rollups WHERE rollup_id = ?", (rollup_id,))
+    connection.execute("DELETE FROM slow_request_rollups WHERE rollup_id = ?", (rollup_id,))
+    connection.execute("DELETE FROM suspicious_ip_rollups WHERE rollup_id = ?", (rollup_id,))
+
+    for status_code, request_count in access_summary.get("status_codes", {}).items():
+        connection.execute(
+            """
+            INSERT INTO status_code_rollups (rollup_id, status_code, request_count)
+            VALUES (?, ?, ?)
+            """,
+            (rollup_id, str(status_code), int(request_count)),
+        )
+
+    for spider in access_summary.get("spiders", []):
+        connection.execute(
+            """
+            INSERT INTO spider_rollups (rollup_id, spider_family, request_count, bytes_out)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                rollup_id,
+                str(spider["family"]),
+                int(spider["requests"]),
+                int(spider["bytes_out"]),
+            ),
+        )
+
+    for category, error_count in error_summary.get("categories", {}).items():
+        connection.execute(
+            """
+            INSERT INTO error_category_rollups (rollup_id, category, error_count)
+            VALUES (?, ?, ?)
+            """,
+            (rollup_id, str(category), int(error_count)),
+        )
+
+    for fingerprint_entry in error_summary.get("top_fingerprints", [])[:20]:
+        connection.execute(
+            """
+            INSERT INTO error_fingerprint_rollups (rollup_id, fingerprint, error_count)
+            VALUES (?, ?, ?)
+            """,
+            (
+                rollup_id,
+                str(fingerprint_entry["fingerprint"]),
+                int(fingerprint_entry["count"]),
+            ),
+        )
+
+    for uri_entry in access_summary.get("top_uris", [])[:20]:
+        connection.execute(
+            """
+            INSERT INTO uri_rollups (rollup_id, uri, request_count)
+            VALUES (?, ?, ?)
+            """,
+            (rollup_id, str(uri_entry["uri"]), int(uri_entry["count"])),
+        )
+
+    for uri_entry in access_summary.get("uri_stats", [])[:20]:
+        connection.execute(
+            """
+            INSERT INTO uri_detail_rollups (rollup_id, uri, request_count, uv_count, bytes_out)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                rollup_id,
+                str(uri_entry["uri"]),
+                int(uri_entry["count"]),
+                int(uri_entry.get("uv_count") or 0),
+                int(uri_entry.get("bytes_out") or 0),
+            ),
+        )
+
+    for source_entry in access_summary.get("source_stats", [])[:20]:
+        connection.execute(
+            """
+            INSERT INTO source_rollups (rollup_id, source_name, request_count, uv_count, bytes_out)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                rollup_id,
+                str(source_entry["source"]),
+                int(source_entry["count"]),
+                int(source_entry.get("uv_count") or 0),
+                int(source_entry.get("bytes_out") or 0),
+            ),
+        )
+
+    for visitor_digest in access_summary.get("visitor_hashes", []):
+        connection.execute(
+            """
+            INSERT INTO visitor_rollups (rollup_id, visitor_hash)
+            VALUES (?, ?)
+            """,
+            (rollup_id, str(visitor_digest)),
+        )
+
+    for client_ip in access_summary.get("client_ips", []):
+        connection.execute(
+            """
+            INSERT INTO client_ip_rollups (rollup_id, client_ip)
+            VALUES (?, ?)
+            """,
+            (rollup_id, str(client_ip)),
+        )
+
+    for client_entry in access_summary.get("client_ip_stats", [])[:20]:
+        connection.execute(
+            """
+            INSERT INTO client_ip_request_rollups (rollup_id, client_ip, request_count, bytes_out)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                rollup_id,
+                str(client_entry["ip"]),
+                int(client_entry["count"]),
+                int(client_entry.get("bytes_out") or 0),
+            ),
+        )
+
+    for family_entry in access_summary.get("client_families", [])[:20]:
+        connection.execute(
+            """
+            INSERT INTO client_family_rollups (rollup_id, client_family, request_count)
+            VALUES (?, ?, ?)
+            """,
+            (
+                rollup_id,
+                str(family_entry["family"]),
+                int(family_entry["count"]),
+            ),
+        )
+
+    for slow_entry in access_summary.get("slow_request_top_uris", [])[:20]:
+        connection.execute(
+            """
+            INSERT INTO slow_request_rollups (rollup_id, uri, slow_request_count)
+            VALUES (?, ?, ?)
+            """,
+            (
+                rollup_id,
+                str(slow_entry["uri"]),
+                int(slow_entry["count"]),
+            ),
+        )
+
+    for suspicious_entry in access_summary.get("suspicious_ips", [])[:20]:
+        connection.execute(
+            """
+            INSERT INTO suspicious_ip_rollups (rollup_id, client_ip, max_requests_per_minute)
+            VALUES (?, ?, ?)
+            """,
+            (
+                rollup_id,
+                str(suspicious_entry["ip"]),
+                int(suspicious_entry["max_requests_per_minute"]),
+            ),
+        )
+
+
+def persist_rollups(
+    connection: sqlite3.Connection,
+    config: dict[str, Any],
+    state: dict[str, Any],
+    now: dt.datetime,
+) -> int:
+    host_id = config["agent"]["host_id"]
+    site = config["agent"]["site"]
+    thresholds = config["thresholds"]
+    timezone = get_timezone(config)
+    access_events = state["history"]["access_events"]
+    error_events = state["history"]["error_events"]
+    system_snapshots = state["history"]["system_snapshots"]
+
+    timestamps = []
+    for item in access_events + error_events + system_snapshots:
+        timestamp = event_timestamp(item)
+        if timestamp is not None:
+            timestamps.append(timestamp)
+
+    upserts = 0
+    for bucket_minutes in config["storage"]["rollup_minutes"]:
+        for bucket_start, bucket_end in iter_closed_buckets(
+            timestamps,
+            now,
+            bucket_minutes,
+            timezone,
+        ):
+            access_summary = summarize_access_window(
+                access_events,
+                bucket_start,
+                bucket_end,
+                thresholds["slow_ms"],
+                thresholds["attack_rpm_threshold"],
+            )
+            error_summary = summarize_errors_window(
+                error_events,
+                bucket_start,
+                bucket_end,
+            )
+            system_summary = summarize_system_snapshots_window(
+                system_snapshots,
+                bucket_start,
+                bucket_end,
+            )
+            if (
+                access_summary["total_requests"] == 0
+                and error_summary["total_errors"] == 0
+                and system_summary["avg_cpu_pct"] is None
+            ):
+                continue
+
+            bucket_start_local = bucket_start.astimezone(timezone).isoformat()
+            bucket_end_local = bucket_end.astimezone(timezone).isoformat()
+            connection.execute(
+                """
+                INSERT INTO metric_rollups (
+                    host_id,
+                    site,
+                    bucket_start,
+                    bucket_end,
+                    bucket_minutes,
+                    request_count,
+                    pv,
+                    uv,
+                    unique_ips,
+                    active_users,
+                    qps,
+                    avg_response_ms,
+                    slow_request_count,
+                    bandwidth_out_bytes,
+                    bandwidth_in_bytes,
+                    total_errors,
+                    avg_cpu_pct,
+                    max_cpu_pct,
+                    avg_memory_pct,
+                    max_memory_pct,
+                    min_disk_free_bytes,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(host_id, site, bucket_start, bucket_minutes)
+                DO UPDATE SET
+                    bucket_end = excluded.bucket_end,
+                    request_count = excluded.request_count,
+                    pv = excluded.pv,
+                    uv = excluded.uv,
+                    unique_ips = excluded.unique_ips,
+                    active_users = excluded.active_users,
+                    qps = excluded.qps,
+                    avg_response_ms = excluded.avg_response_ms,
+                    slow_request_count = excluded.slow_request_count,
+                    bandwidth_out_bytes = excluded.bandwidth_out_bytes,
+                    bandwidth_in_bytes = excluded.bandwidth_in_bytes,
+                    total_errors = excluded.total_errors,
+                    avg_cpu_pct = excluded.avg_cpu_pct,
+                    max_cpu_pct = excluded.max_cpu_pct,
+                    avg_memory_pct = excluded.avg_memory_pct,
+                    max_memory_pct = excluded.max_memory_pct,
+                    min_disk_free_bytes = excluded.min_disk_free_bytes,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    host_id,
+                    site,
+                    bucket_start_local,
+                    bucket_end_local,
+                    bucket_minutes,
+                    access_summary["total_requests"],
+                    access_summary["pv"],
+                    access_summary["uv"],
+                    access_summary["unique_ips"],
+                    access_summary["active_users_10m"],
+                    access_summary["qps"],
+                    access_summary["avg_response_ms"],
+                    access_summary["slow_request_count"],
+                    access_summary["bandwidth_out_bytes"],
+                    access_summary["bandwidth_in_bytes"],
+                    error_summary["total_errors"],
+                    system_summary["avg_cpu_pct"],
+                    system_summary["max_cpu_pct"],
+                    system_summary["avg_memory_pct"],
+                    system_summary["max_memory_pct"],
+                    system_summary["min_disk_free_bytes"],
+                ),
+            )
+
+            rollup_id = connection.execute(
+                """
+                SELECT id
+                FROM metric_rollups
+                WHERE host_id = ?
+                  AND site = ?
+                  AND bucket_start = ?
+                  AND bucket_minutes = ?
+                """,
+                (host_id, site, bucket_start_local, bucket_minutes),
+            ).fetchone()[0]
+            rewrite_rollup_details(connection, rollup_id, access_summary, error_summary)
+            upserts += 1
+
+    connection.commit()
+    return upserts
+
+
+def record_run(
+    connection: sqlite3.Connection,
+    config: dict[str, Any],
+    run_started_at: dt.datetime,
+    run_finished_at: dt.datetime,
+    parser_stats: dict[str, int],
+    rollups_upserted: int,
+    mode: str,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO agent_runs (
+            run_started_at,
+            run_finished_at,
+            host_id,
+            site,
+            mode,
+            access_lines_read,
+            access_lines_dropped,
+            error_lines_read,
+            error_lines_dropped,
+            rollups_upserted
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            run_started_at.isoformat(),
+            run_finished_at.isoformat(),
+            config["agent"]["host_id"],
+            config["agent"]["site"],
+            mode,
+            parser_stats["access_lines_read"],
+            parser_stats["access_lines_dropped"],
+            parser_stats["error_lines_read"],
+            parser_stats["error_lines_dropped"],
+            rollups_upserted,
+        ),
+    )
+    connection.commit()
+
+
+def run_cycle(
+    config: dict[str, Any],
+    state: dict[str, Any],
+    connection: sqlite3.Connection,
+    config_path: Path,
+    config_generated: bool,
+    mode: str,
+) -> dict[str, Any]:
+    run_started_at = utcnow()
+    host_id = config["agent"]["host_id"]
+    site = config["agent"]["site"]
+    site_host = config["agent"]["site_host"]
+    thresholds = config["thresholds"]
+    timezone = get_timezone(config)
+
+    access_path = Path(config["logs"]["access_log"])
+    error_path = Path(config["logs"]["error_log"])
+    state_file = Path(config["agent"]["state_file"])
+    database_file = Path(config["storage"]["database_file"])
+
+    access_lines, access_cursor = read_incremental_lines(
+        access_path,
+        state["cursors"].get("access_log"),
+        config["agent"]["startup_mode"],
+        config["agent"]["bootstrap_tail_lines"],
+    )
+    error_lines, error_cursor = read_incremental_lines(
+        error_path,
+        state["cursors"].get("error_log"),
+        config["agent"]["startup_mode"],
+        config["agent"]["bootstrap_tail_lines"],
+    )
+    state["cursors"]["access_log"] = access_cursor
+    state["cursors"]["error_log"] = error_cursor
+
+    access_events = []
+    dropped_access = 0
+    for line in access_lines:
+        event = parse_access_line(line, host_id, site, site_host, timezone)
+        if event is None:
+            dropped_access += 1
+            continue
+        access_events.append(event)
+
+    error_events = []
+    dropped_errors = 0
+    for line in error_lines:
+        event = parse_error_line(line, host_id, site, timezone)
+        if event is None:
+            dropped_errors += 1
+            continue
+        error_events.append(event)
+
+    system_snapshot = collect_system_snapshot(
+        config["agent"]["disk_root"],
+        host_id,
+        site,
+    )
+
+    state["history"]["access_events"].extend(serialize_events(access_events))
+    state["history"]["error_events"].extend(serialize_events(error_events))
+    state["history"]["system_snapshots"].append(serialize_events([system_snapshot])[0])
+
+    now = utcnow()
+    prune_history(state, config, now)
+    save_state(state_file, state)
+
+    summary_window_start = now - dt.timedelta(
+        minutes=thresholds["summary_window_minutes"]
+    )
+    access_summary = summarize_access_window(
+        state["history"]["access_events"],
+        summary_window_start,
+        now,
+        thresholds["slow_ms"],
+        thresholds["attack_rpm_threshold"],
+    )
+    error_summary = summarize_errors_window(
+        state["history"]["error_events"],
+        summary_window_start,
+        now,
+    )
+    alerts = evaluate_alerts(system_snapshot, access_summary, error_summary, thresholds)
+    alert_deliveries = deliver_alerts(
+        config,
+        state,
+        now,
+        alerts,
+        system_snapshot,
+        access_summary,
+        error_summary,
+    )
+    save_state(state_file, state)
+
+    parser_stats = {
+        "access_lines_read": len(access_lines),
+        "access_lines_dropped": dropped_access,
+        "error_lines_read": len(error_lines),
+        "error_lines_dropped": dropped_errors,
+    }
+    rollups_upserted = persist_rollups(connection, config, state, now)
+    run_finished_at = utcnow()
+    record_run(
+        connection,
+        config,
+        run_started_at,
+        run_finished_at,
+        parser_stats,
+        rollups_upserted,
+        mode,
+    )
+
+    payload = {
+        "meta": {
+            "host_id": host_id,
+            "site": site,
+            "generated_at": now.isoformat(),
+            "config_path": str(config_path),
+            "config_generated": config_generated,
+            "mode": mode,
+            "access_log": str(access_path),
+            "error_log": str(error_path),
+            "state_file": str(state_file),
+            "database_file": str(database_file),
+            "summary_window_minutes": thresholds["summary_window_minutes"],
+            "rollup_minutes": config["storage"]["rollup_minutes"],
+        },
+        "system_snapshot": system_snapshot,
+        "traffic": access_summary,
+        "errors": error_summary,
+        "alerts": alerts,
+        "notifications": {
+            "alert_deliveries": alert_deliveries,
+        },
+        "parser_stats": parser_stats,
+        "storage": {
+            "rollups_upserted": rollups_upserted,
+            "history_access_events": len(state["history"]["access_events"]),
+            "history_error_events": len(state["history"]["error_events"]),
+            "history_system_snapshots": len(state["history"]["system_snapshots"]),
+        },
+    }
+
+    if config["agent"]["emit_events"]:
+        payload["access_events"] = serialize_events(access_events)
+        payload["error_events"] = serialize_events(error_events)
+    return payload
+
+
+def mask_secret_url(url: str) -> str:
+    cleaned = str(url or "")
+    if not cleaned:
+        return ""
+    if len(cleaned) <= 24:
+        return cleaned[:8] + "***"
+    return cleaned[:24] + "..." + cleaned[-8:]
+
+
+def sanitize_config_for_output(config: dict[str, Any], config_path: Path) -> dict[str, Any]:
+    output = copy.deepcopy(config)
+    for channel_name in ("dingtalk", "wecom", "feishu"):
+        channel = output.get("notifications", {}).get("webhooks", {}).get(channel_name)
+        if isinstance(channel, dict) and channel.get("url"):
+            channel["url"] = mask_secret_url(str(channel["url"]))
+    output["meta"] = {
+        "config_path": str(config_path.resolve()),
+        "yaml_parser_available": yaml is not None,
+    }
+    return output
+
+
+def resolve_mode(args: argparse.Namespace, config: dict[str, Any]) -> str:
+    if args.daemon:
+        return "daemon"
+    if args.once:
+        return "once"
+    return config["agent"].get("mode", "once")
+
+
+def run_daemon(
+    config: dict[str, Any],
+    state: dict[str, Any],
+    connection: sqlite3.Connection,
+    config_path: Path,
+    config_generated: bool,
+) -> int:
+    interval_seconds = config["agent"]["poll_interval_seconds"]
+    while True:
+        try:
+            payload = run_cycle(
+                config,
+                state,
+                connection,
+                config_path,
+                config_generated,
+                "daemon",
+            )
+            print(json.dumps(payload, sort_keys=True), flush=True)
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            try:
+                connection.rollback()
+            except sqlite3.Error:
+                pass
+            failure_payload = {
+                "meta": {
+                    "mode": "daemon",
+                    "host_id": config["agent"]["host_id"],
+                    "site": config["agent"]["site"],
+                    "generated_at": utcnow().isoformat(),
+                    "cycle_status": "failed",
+                },
+                "error": {
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                    "traceback": traceback.format_exc(limit=8),
+                },
+            }
+            print(json.dumps(failure_payload, sort_keys=True), flush=True)
+        time.sleep(interval_seconds)
+
+
+def main() -> int:
+    args = parse_args()
+    config_path = args.config.resolve()
+    config, config_generated = load_config(config_path)
+    mode = resolve_mode(args, config)
+
+    if args.print_config:
+        print(
+            json.dumps(
+                sanitize_config_for_output(config, config_path),
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+
+    state_file = Path(config["agent"]["state_file"])
+    database_file = Path(config["storage"]["database_file"])
+    state = load_state(state_file)
+    connection = init_database(database_file)
+    try:
+        if mode == "daemon":
+            return run_daemon(config, state, connection, config_path, config_generated)
+        payload = run_cycle(
+            config,
+            state,
+            connection,
+            config_path,
+            config_generated,
+            "once",
+        )
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    finally:
+        connection.close()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
