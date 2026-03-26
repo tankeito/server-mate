@@ -12,6 +12,7 @@
   "keywords": [
     "server-monitoring",
     "ai-ops",
+    "multi-site",
     "linux",
     "nginx",
     "apache",
@@ -42,6 +43,7 @@
     ]
   },
   "features": [
+    "Multi-site matrix configuration with isolated per-domain rollups",
     "Real-time host metrics (CPU, memory, disk, network)",
     "Nginx/Apache access and error log parsing",
     "Traffic analysis (PV, UV, IP, QPS, bandwidth)",
@@ -54,6 +56,7 @@
   "integrations": [
     "DingTalk webhook",
     "WeCom webhook",
+    "Feishu webhook",
     "ServerChan",
     "OpenClaw AI analyzer",
     "SQLite for local storage"
