@@ -6,7 +6,7 @@ English | [中文](README_ZH.md)
 
 > A two-plane monitoring system for Linux hosts running Nginx or Apache.
 
-[![Version](https://img.shields.io/badge/version-1.1.2-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)]()
 [![OpenClaw](https://img.shields.io/badge/OpenClaw-Skill-success.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Platform-CentOS%2FUbuntu%2FDebian-lightgrey.svg)](https://linux.org)
@@ -29,7 +29,7 @@ It splits responsibilities into two planes:
 - 📝 **Log Parsing**: Nginx/Apache access and error log normalization
 - 📈 **Traffic Analysis**: PV, UV, IP counts, QPS, bandwidth, status breakdown
 - 🕷️ **Spider Detection**: Crawler family identification and traffic separation
-- ⚠️ **Smart Alerts**: Threshold-based webhooks (DingTalk, WeCom, ServerChan)
+- ⚠️ **Smart Alerts**: Threshold-based webhooks (DingTalk, WeCom, Feishu, Telegram)
 - 🤖 **AI Diagnosis**: Natural-language error explanations and remediation guidance
 - 📄 **Auto Reports**: Daily/Weekly/Monthly PDF reports with AI commentary
 - 🔒 **Guarded Automation**: Optional auto-ban and auto-heal with cooldowns and audit logs
@@ -44,7 +44,30 @@ It splits responsibilities into two planes:
 
 ---
 
-## 🆕 What's New in v1.1.2
+## 🆕 What's New in v1.2.0
+
+### PDF Overflow Guard
+
+- **URL / Referer Truncation**: query strings are removed before table rendering, then long text is hard-truncated
+- **Stable Table Layouts**: oversized tokens no longer break dense PDF pages
+
+### Telegram Push
+
+- **New Channel**: webhook center now supports Telegram bot delivery
+- **Env Fallback**: `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are used when config values are empty
+
+### Out-of-the-box GeoIP
+
+- **Auto-Provisioning**: The report generator now automatically downloads the required GeoLite2 `.mmdb` database from a public mirror if it's missing, delivering zero-config IP geolocation.
+
+### AI Alert Diagnosis
+
+- **Pre-Send AI Review**: warning and critical alerts can call the shared AI endpoint before webhook delivery
+- **Two-Sentence Output**: alert cards append a compact `💡 AI 智能诊断` block with plain-language cause and next action
+
+### systemd Template
+
+- **`server-mate.service`**: added a ready-to-edit service template for daemon hosting with `Restart=always`
 
 ### Multi-Site Monitoring
 
@@ -72,7 +95,7 @@ It splits responsibilities into two planes:
 
 ### Configuration
 
-- **`config.example.yaml`**: Recommended starting point for v1.1.2 with multi-site, system_metrics, and Guarded Automation pre-configured
+- **`config.example.yaml`**: Recommended starting point for v1.2.0 with multi-site, Telegram, AI alert diagnosis, and Guarded Automation pre-configured
 
 ---
 
@@ -96,7 +119,7 @@ python3 -m pip install geoip2
 
 Generate or edit `config.yaml`:
 
-For `1.1.2`, it is recommended to copy [`config.example.yaml`](config.example.yaml) to `config.yaml` first. In OpenClaw, keep `config.yaml`, `metrics.db`, `logs/`, and `reports/` inside the current workspace (`./`).
+For `1.2.0`, it is recommended to copy [`config.example.yaml`](config.example.yaml) to `config.yaml` first. In OpenClaw, keep `config.yaml`, `metrics.db`, `logs/`, and `reports/` inside the current workspace (`./`).
 
 ```yaml
 agent:
@@ -118,10 +141,14 @@ notifications:
     dingtalk:
       enabled: true
       url: https://oapi.dingtalk.com/robot/send?access_token=YOUR_TOKEN
+    telegram:
+      enabled: false
+      bot_token: ""
+      chat_id: ""
   reports:
     report_language: zh
-    report_export_dir: ./reports
-    public_base_url: https://ops.example.com/reports
+    report_export_dir: ""
+    public_base_url: ""
     daily:
       enabled: true
       push_time: "08:30"
@@ -182,7 +209,7 @@ Add these lines:
 │  - Aggregation & storage                                    │
 │  - Natural-language query handler                           │
 │  - AI error diagnosis                                       │
-│  - Webhook alerts (DingTalk, WeCom, ServerChan)             │
+│  - Webhook alerts (DingTalk, WeCom, Feishu, Telegram)       │
 │  - Guarded auto-ban / auto-heal                             │
 │  - PDF report generator (Daily/Weekly/Monthly)              │
 └─────────────────────────────────────────────────────────────┘
@@ -245,7 +272,7 @@ Add these lines:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `database_file` | string | `./server_agent.sqlite3` | SQLite database path |
+| `database_file` | string | `./metrics.db` | SQLite database path |
 | `rollup_minutes` | array | `[10, 60]` | Bucket granularities |
 
 ### `notifications.webhooks` Section
@@ -254,7 +281,8 @@ Add these lines:
 |---------|--------|
 | `dingtalk` | `enabled`, `url`, `timeout_seconds`, `at_all` |
 | `wecom` | `enabled`, `url`, `timeout_seconds` |
-| `serverchan` | `enabled`, `sckey`, `timeout_seconds` |
+| `feishu` | `enabled`, `url`, `timeout_seconds` |
+| `telegram` | `enabled`, `bot_token`, `chat_id`, `timeout_seconds` |
 
 ### `notifications.reports` Section
 
@@ -366,6 +394,7 @@ server-mate/
 ├── README.md                         # English documentation
 ├── README_ZH.md                      # Chinese documentation
 ├── user-guide.md                     # Detailed deployment guide
+├── server-mate.service               # systemd service template
 ├── agents/
 │   └── openai.yaml                  # OpenAI agent interface config
 ├── references/

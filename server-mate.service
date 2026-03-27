@@ -1,0 +1,16 @@
+[Unit]
+Description=Server-Mate OpenClaw Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/server-mate
+ExecStart=/usr/bin/env bash -lc 'mkdir -p ./logs ./reports && python3 ./scripts/server_agent.py --config ./config.yaml --daemon'
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

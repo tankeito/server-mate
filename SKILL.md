@@ -1,6 +1,6 @@
 ---
 name: server-mate
-version: 1.1.2
+version: 1.2.0
 description: Build or extend a lightweight server monitoring and AI operations workflow for Linux hosts running Nginx or Apache. Use when Codex needs to collect psutil metrics, parse access or error logs, design JSON payloads or APIs, add webhook alerts, generate daily or weekly ops reports, answer natural-language monitoring questions, or implement guarded auto-ban and auto-heal behaviors.
 homepage: https://github.com/tankeito/server-mate
 metadata:
@@ -10,12 +10,13 @@ metadata:
       - references/*
       - config.example.yaml
       - user-guide.md
+      - server-mate.service
       - _meta.json
 ---
 
 # Server Mate
 
-Version: `1.1.2`
+Version: `1.2.0`
 
 Use this skill to design or implement a two-plane monitoring system:
 - a Python agent on the server that tails logs and samples host metrics
@@ -26,6 +27,7 @@ Use this skill to design or implement a two-plane monitoring system:
 - Confirm the environment first: Linux distribution, Nginx or Apache, PHP-FPM layout, log paths, webhook target, and whether automated actions may touch a live host.
 - Keep collection read-only until the user explicitly asks for automation. Add alerting before any auto-ban or auto-heal behavior.
 - In OpenClaw deployments, `OPENAI_API_KEY` is injected by the runtime when AI analysis is enabled. Do not ask the user to export it manually. Treat webhook URLs or tokens in `config.yaml` as secrets and do not commit them.
+- Telegram delivery may read `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` when the config leaves those fields blank.
 - Treat auto-ban and auto-heal as privileged features. They may execute operator-supplied firewall or service restart commands and should stay disabled or `dry_run: true` until reviewed.
 - Use the references progressively instead of loading everything at once:
   - Read [references/architecture.md](references/architecture.md) for overall design, component boundaries, and rollout order.
@@ -106,12 +108,16 @@ Use external scheduling for production unless the user explicitly wants an alway
   - Monthly PDF push on day `1` at `01:20`.
 - In multi-site mode, a single scheduled `report_generator.py` run should iterate over every configured site unless the user explicitly passes `--site`.
 
-## Release notes for 1.1.2
+## Release notes for 1.2.0
 
 - Multi-site matrix config using `sites[]` plus global `system_metrics`
 - Host-global metrics stored separately from site-local business rollups
 - Logrotate-tolerant incremental readers with inode or truncate recovery
 - Guarded Automation with `dry_run`, whitelist checks, TTL-based unban, cooldown-based auto-heal, and SQLite audit trail
+- Telegram delivery with config-or-environment credential fallback
+- Pre-send AI alert diagnosis with a compact two-sentence remediation block
+- URL and referer truncation before dense PDF table rendering
+- Bundled `server-mate.service` template for `systemd`-managed daemon startup
 
 Copyable cron examples:
 

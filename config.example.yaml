@@ -1,4 +1,4 @@
-# Server-Mate 1.1.1 example configuration
+# Server-Mate 1.2.0 example configuration
 
 agent:
   host_id: web-01
@@ -21,13 +21,13 @@ sites:
   - domain: site-a.example.com
     site_host: site-a.example.com
     enabled: true
-    access_log: /path/to/logs/site-a.access.log
-    error_log: /path/to/logs/site-a.error.log
+    access_log: ./logs/site-a.access.log
+    error_log: ./logs/site-a.error.log
   - domain: site-b.example.com
     site_host: site-b.example.com
     enabled: true
-    access_log: /path/to/logs/site-b.access.log
-    error_log: /path/to/logs/site-b.error.log
+    access_log: ./logs/site-b.access.log
+    error_log: ./logs/site-b.error.log
 
 thresholds:
   summary_window_minutes: 10
@@ -43,7 +43,7 @@ thresholds:
   scan_404_distinct_uris: 10
 
 storage:
-  database_file: ./server_agent.sqlite3
+  database_file: ./metrics.db
   rollup_minutes: [10, 60]
 
 notifications:
@@ -61,6 +61,12 @@ notifications:
       enabled: false
       url: https://open.feishu.cn/open-apis/bot/v2/hook/YOUR_TOKEN
       timeout_seconds: 10
+    telegram:
+      enabled: false
+      bot_token: ""
+      chat_id: ""
+      timeout_seconds: 10
+      disable_web_page_preview: true
   alerts:
     enabled: true
     minimum_severity: warning
@@ -68,9 +74,9 @@ notifications:
     channels: [dingtalk]
   reports:
     report_language: zh
-    report_export_dir: /srv/reports/server-mate
-    public_base_url: https://ops.example.com/reports
-    geoip_city_db: /opt/GeoLite2-City.mmdb
+    report_export_dir: ""
+    public_base_url: ""
+    geoip_city_db: ./data/GeoLite2-City.mmdb
     ai_analysis:
       enabled: true
       simulate: false
@@ -84,8 +90,8 @@ notifications:
       push_time: "08:30"
       channels: [dingtalk]
       output_dir: ./reports
-      report_export_dir: /srv/reports/server-mate
-      public_base_url: https://ops.example.com/reports
+      report_export_dir: ""
+      public_base_url: ""
       send_on_startup_if_missed: false
     weekly:
       enabled: true
@@ -93,16 +99,16 @@ notifications:
       push_time: "09:00"
       channels: [dingtalk]
       output_dir: ./reports
-      report_export_dir: /srv/reports/server-mate
-      public_base_url: https://ops.example.com/reports
+      report_export_dir: ""
+      public_base_url: ""
     monthly:
       enabled: true
       push_day: 1
       push_time: "09:30"
       channels: [dingtalk]
       output_dir: ./reports
-      report_export_dir: /srv/reports/server-mate
-      public_base_url: https://ops.example.com/reports
+      report_export_dir: ""
+      public_base_url: ""
 
 automation:
   dry_run: true

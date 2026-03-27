@@ -1,6 +1,6 @@
 {
   "name": "server-mate",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "description": "Lightweight server monitoring and AI operations workflow for Linux hosts running Nginx or Apache",
   "author": "tankeito",
   "license": "MIT",
@@ -13,6 +13,8 @@
     "server-monitoring",
     "ai-ops",
     "multi-site",
+    "telegram",
+    "systemd",
     "linux",
     "nginx",
     "apache",
@@ -49,21 +51,27 @@
     "Traffic analysis (PV, UV, IP, QPS, bandwidth)",
     "Spider detection and traffic separation",
     "Threshold-based webhook alerts",
+    "Telegram bot alert delivery",
+    "AI alert diagnosis with plain-language remediation hints",
     "AI-powered error diagnosis",
     "Daily/Weekly/Monthly PDF reports",
+    "PDF-safe long URL and referer truncation",
     "Guarded auto-ban and auto-heal automation"
   ],
   "integrations": [
     "DingTalk webhook",
     "WeCom webhook",
     "Feishu webhook",
-    "ServerChan",
+    "Telegram bot API",
     "OpenClaw AI analyzer",
     "SQLite for local storage"
   ],
   "environment_variables": {
     "required": [],
-    "optional": [],
+    "optional": [
+      "TELEGRAM_BOT_TOKEN",
+      "TELEGRAM_CHAT_ID"
+    ],
     "managed_by_runtime": [
       "OPENAI_API_KEY"
     ],
@@ -73,12 +81,19 @@
     "managed_env": [
       "OPENAI_API_KEY"
     ],
+    "optional_env": [
+      "TELEGRAM_BOT_TOKEN",
+      "TELEGRAM_CHAT_ID"
+    ],
     "config_secrets": [
       "notifications.webhooks.*.url",
+      "notifications.webhooks.telegram.bot_token",
+      "notifications.webhooks.telegram.chat_id",
       "notifications.ai_analysis.api_key_env"
     ],
     "notes": [
       "OPENAI_API_KEY is injected by the OpenClaw runtime when AI analysis is enabled.",
+      "Telegram bot_token and chat_id may be stored in config.yaml or supplied via environment variables.",
       "Webhook URLs and tokens are operator-supplied secrets stored in config.yaml."
     ]
   },
@@ -91,6 +106,7 @@
     "requires_root_when_enabled": true,
     "data_egress": [
       "User-configured webhook endpoints",
+      "Telegram bot API when Telegram delivery is enabled",
       "OpenAI API when AI analysis is enabled"
     ]
   },

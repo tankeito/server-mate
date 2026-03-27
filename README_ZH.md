@@ -6,7 +6,7 @@
 
 > 专为运行 Nginx 或 Apache 的 Linux 主机设计的双平面监控系统。
 
-[![Version](https://img.shields.io/badge/version-1.1.2-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)]()
 [![OpenClaw](https://img.shields.io/badge/OpenClaw-Skill-success.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Platform-CentOS%2FUbuntu%2FDebian-lightgrey.svg)](https://linux.org)
@@ -29,7 +29,7 @@
 - 📝 **日志解析**：Nginx/Apache 访问日志和错误日志标准化
 - 📈 **流量分析**：PV、UV、IP 统计、QPS、带宽、状态码分布
 - 🕷️ **蜘蛛检测**：爬虫家族识别和流量分离
-- ⚠️ **智能警报**：基于阈值的 Webhook 推送（钉钉、企业微信、ServerChan）
+- ⚠️ **智能警报**：基于阈值的 Webhook 推送（钉钉、企业微信、飞书、Telegram）
 - 🤖 **AI 诊断**：自然语言错误解释和修复指导
 - 📄 **自动报告**：日报/周报/月报 PDF，附带 AI 评论
 - 🔒 **安全自动化**：可选的自动封禁和自动修复，带冷却时间和审计日志
@@ -44,7 +44,30 @@
 
 ---
 
-## 🆕 v1.1.2 新功能
+## 🆕 v1.2.0 新功能
+
+### PDF 长文本防溢出
+
+- **URL / Referer 截断**：表格渲染前先剔除查询参数，再执行硬截断
+- **表格稳定**：超长 Token 不再撑爆高密度 PDF 页面
+
+### Telegram 推送
+
+- **新增通道**：Webhook 中心现已支持 Telegram 机器人推送
+- **环境变量兜底**：当配置留空时，可回退读取 `TELEGRAM_BOT_TOKEN` 与 `TELEGRAM_CHAT_ID`
+
+### GeoIP 开箱即用
+
+- **全自动依赖补全**：生成报表时若缺失 IP 地理位置数据库，系统将自动从开源镜像站静默下载 `.mmdb` 库文件，真正实现“零配置”的物理位置解析体验。
+
+### AI 告警实时诊断
+
+- **发前增强**：WARNING / CRITICAL 告警在发送前可先调用共享 AI 接口
+- **两句话输出**：告警卡片追加 `💡 AI 智能诊断` 模块，只保留原因分析与行动建议
+
+### systemd 模板
+
+- **`server-mate.service`**：新增可直接修改的守护模板，内置 `Restart=always`
 
 ### 多站点监控
 
@@ -72,7 +95,7 @@
 
 ### 配置
 
-- **`config.example.yaml`**：v1.1.2 的推荐起点，预配置多站点、system_metrics 和 Guarded Automation
+- **`config.example.yaml`**：v1.2.0 的推荐起点，预配置多站点、Telegram、AI 告警诊断和 Guarded Automation
 
 ---
 
@@ -96,7 +119,7 @@ python3 -m pip install geoip2
 
 生成或编辑 `config.yaml`：
 
-从 `1.1.2` 开始，建议优先复制 [`config.example.yaml`](config.example.yaml) 为 `config.yaml`。在 OpenClaw 中，请将 `config.yaml`、`metrics.db`、`logs/` 和 `reports/` 全部保留在当前工作目录 `./` 下。
+从 `1.2.0` 开始，建议优先复制 [`config.example.yaml`](config.example.yaml) 为 `config.yaml`。在 OpenClaw 中，请将 `config.yaml`、`metrics.db`、`logs/` 和 `reports/` 全部保留在当前工作目录 `./` 下。
 
 ```yaml
 agent:
@@ -118,10 +141,14 @@ notifications:
     dingtalk:
       enabled: true
       url: https://oapi.dingtalk.com/robot/send?access_token=YOUR_TOKEN
+    telegram:
+      enabled: false
+      bot_token: ""
+      chat_id: ""
   reports:
     report_language: zh
-    report_export_dir: ./reports
-    public_base_url: https://ops.example.com/reports
+    report_export_dir: ""
+    public_base_url: ""
     daily:
       enabled: true
       push_time: "08:30"
@@ -182,7 +209,7 @@ crontab -e
 │  - 聚合与存储                                               │
 │  - 自然语言查询处理器                                       │
 │  - AI 错误诊断                                              │
-│  - Webhook 警报（钉钉、企业微信、ServerChan）               │
+│  - Webhook 警报（钉钉、企业微信、飞书、Telegram）          │
 │  - 安全的自动封禁/自动修复                                  │
 │  - PDF 报告生成器（日报/周报/月报）                         │
 └─────────────────────────────────────────────────────────────┘
@@ -245,7 +272,7 @@ crontab -e
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `database_file` | string | `./server_agent.sqlite3` | SQLite 数据库路径 |
+| `database_file` | string | `./metrics.db` | SQLite 数据库路径 |
 | `rollup_minutes` | array | `[10, 60]` | 桶粒度 |
 
 ### `notifications.webhooks` 部分
@@ -254,7 +281,8 @@ crontab -e
 |------|------|
 | `dingtalk` | `enabled`, `url`, `timeout_seconds`, `at_all` |
 | `wecom` | `enabled`, `url`, `timeout_seconds` |
-| `serverchan` | `enabled`, `sckey`, `timeout_seconds` |
+| `feishu` | `enabled`, `url`, `timeout_seconds` |
+| `telegram` | `enabled`, `bot_token`, `chat_id`, `timeout_seconds` |
 
 ### `notifications.reports` 部分
 
@@ -366,6 +394,7 @@ server-mate/
 ├── README.md                         # 英文文档
 ├── README_ZH.md                      # 中文文档
 ├── user-guide.md                     # 详细部署指南
+├── server-mate.service               # systemd 守护模板
 ├── agents/
 │   └── openai.yaml                  # OpenAI 代理接口配置
 ├── references/
