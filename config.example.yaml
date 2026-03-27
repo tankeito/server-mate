@@ -33,6 +33,11 @@ sites:
     enabled: true
     access_log: ./logs/site-b.access.log
     error_log: ./logs/site-b.error.log
+  - domain: site-c.example.com
+    site_host: site-c.example.com
+    enabled: true
+    access_log: ./logs/site-c.access.log
+    error_log: ./logs/site-c.error.log
 
 thresholds:
   summary_window_minutes: 10
@@ -78,7 +83,7 @@ notifications:
     enabled: true
     minimum_severity: warning
     cooldown_seconds: 300
-    channels: [dingtalk]
+    channels: [dingtalk, feishu, telegram]
   reports:
     report_language: zh
     report_export_dir: ""
@@ -95,7 +100,7 @@ notifications:
     daily:
       enabled: true
       push_time: "08:30"
-      channels: [dingtalk]
+      channels: [dingtalk, feishu, telegram]
       output_dir: ./reports
       report_export_dir: ""
       public_base_url: ""
@@ -104,7 +109,7 @@ notifications:
       enabled: true
       push_weekday: 1
       push_time: "09:00"
-      channels: [dingtalk]
+      channels: [dingtalk, feishu, telegram]
       output_dir: ./reports
       report_export_dir: ""
       public_base_url: ""
@@ -112,7 +117,7 @@ notifications:
       enabled: true
       push_day: 1
       push_time: "09:30"
-      channels: [dingtalk]
+      channels: [dingtalk, feishu, telegram]
       output_dir: ./reports
       report_export_dir: ""
       public_base_url: ""
