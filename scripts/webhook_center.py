@@ -4,17 +4,13 @@
 from __future__ import annotations
 
 import json
-import os
-import re
 import urllib.error
 import urllib.request
 from typing import Any, Iterable
 
 
-SUPPORTED_CHANNELS = ("dingtalk", "wecom", "feishu", "telegram")
+SUPPORTED_CHANNELS = ("dingtalk", "wecom", "feishu")
 SEVERITY_RANK = {"info": 0, "warning": 1, "critical": 2}
-TELEGRAM_MARKDOWN_V2_SPECIALS = r"_*[]()~`>#+-=|{}.!"
-MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 
 
 def normalize_channel_names(channels: Iterable[str] | None) -> list[str]:
@@ -43,21 +39,6 @@ def get_active_channels(
             continue
         if not channel_config.get("enabled"):
             continue
-        if name == "telegram":
-            resolved = dict(channel_config)
-            resolved["bot_token"] = str(
-                channel_config.get("bot_token") or os.getenv("TELEGRAM_BOT_TOKEN") or ""
-            ).strip()
-            resolved["chat_id"] = str(
-                channel_config.get("chat_id") or os.getenv("TELEGRAM_CHAT_ID") or ""
-            ).strip()
-            resolved["disable_web_page_preview"] = bool(
-                channel_config.get("disable_web_page_preview", True)
-            )
-            if not resolved["bot_token"] or not resolved["chat_id"]:
-                continue
-            active.append((name, resolved))
-            continue
         if not str(channel_config.get("url") or "").strip():
             continue
         active.append((name, channel_config))
@@ -85,41 +66,6 @@ def markdown_to_feishu_post(title: str, markdown: str) -> dict[str, Any]:
     }
 
 
-def escape_telegram_markdown_v2(text: str) -> str:
-    escaped = str(text or "")
-    for char in TELEGRAM_MARKDOWN_V2_SPECIALS:
-        escaped = escaped.replace(char, f"\\{char}")
-    return escaped
-
-
-def normalize_markdown_line_for_telegram(line: str) -> str:
-    text = MARKDOWN_LINK_RE.sub(r"\1: \2", str(line or ""))
-    text = text.replace("**", "").replace("__", "").replace("`", "")
-    return text.strip()
-
-
-def markdown_to_telegram_text(title: str, markdown: str) -> str:
-    rendered_lines = [f"*{escape_telegram_markdown_v2(title)}*"]
-    for raw_line in str(markdown or "").splitlines():
-        line = normalize_markdown_line_for_telegram(raw_line)
-        if not line:
-            rendered_lines.append("")
-            continue
-        if line.startswith("#"):
-            rendered_lines.append(
-                f"*{escape_telegram_markdown_v2(line.lstrip('#').strip())}*"
-            )
-            continue
-        if line.startswith("- "):
-            rendered_lines.append(f"• {escape_telegram_markdown_v2(line[2:].strip())}")
-            continue
-        if line.startswith("> "):
-            rendered_lines.append(f"_{escape_telegram_markdown_v2(line[2:].strip())}_")
-            continue
-        rendered_lines.append(escape_telegram_markdown_v2(line))
-    return "\n".join(rendered_lines).strip()
-
-
 def build_markdown_payload(
     channel: str,
     title: str,
@@ -139,22 +85,7 @@ def build_markdown_payload(
         }
     if channel == "feishu":
         return markdown_to_feishu_post(title, markdown)
-    if channel == "telegram":
-        return {
-            "chat_id": channel_config["chat_id"],
-            "text": markdown_to_telegram_text(title, markdown),
-            "parse_mode": "MarkdownV2",
-            "disable_web_page_preview": bool(
-                channel_config.get("disable_web_page_preview", True)
-            ),
-        }
     raise ValueError(f"Unsupported webhook channel: {channel}")
-
-
-def build_delivery_url(channel: str, channel_config: dict[str, Any]) -> str:
-    if channel == "telegram":
-        return f"https://api.telegram.org/bot{channel_config['bot_token']}/sendMessage"
-    return str(channel_config["url"])
 
 
 def parse_response_body(raw_body: bytes) -> tuple[str, dict[str, Any] | None]:
@@ -180,8 +111,6 @@ def response_is_success(
         return str(body_json.get("errcode")) == "0"
     if channel == "feishu":
         return str(body_json.get("code")) == "0"
-    if channel == "telegram":
-        return bool(body_json.get("ok"))
     return False
 
 
@@ -237,7 +166,7 @@ def send_markdown_message(
     for channel, channel_config in get_active_channels(config, channels):
         payload = build_markdown_payload(channel, title, markdown, channel_config)
         timeout_seconds = max(int(channel_config.get("timeout_seconds", 10)), 1)
-        response = post_json(build_delivery_url(channel, channel_config), payload, timeout_seconds)
+        response = post_json(channel_config["url"], payload, timeout_seconds)
         response["channel"] = channel
         response["success"] = response_is_success(
             channel,
@@ -246,3 +175,4 @@ def send_markdown_message(
         )
         results.append(response)
     return results
+

@@ -1,6 +1,6 @@
 # Server-Mate User Guide
 
-Version: `1.2.0`
+Version: `1.1.1`
 
 ## 1. What This Guide Covers
 
@@ -10,7 +10,6 @@ It covers:
 
 - Python and system dependencies
 - multi-site `config.yaml` setup
-- Telegram push and AI alert diagnosis
 - Daily / weekly / monthly report generation
 - Guarded Automation safety rules and audit workflow
 - Cron and systemd scheduling
@@ -133,15 +132,11 @@ notifications:
     dingtalk:
       enabled: true
       url: https://oapi.dingtalk.com/robot/send?access_token=YOUR_TOKEN
-    telegram:
-      enabled: false
-      bot_token: ""
-      chat_id: ""
   reports:
     report_language: zh
-    report_export_dir: ""
-    public_base_url: ""
-    geoip_city_db: ./GeoLite2-City.mmdb
+    report_export_dir: ./public/reports
+    public_base_url: https://ops.example.com/reports
+    geoip_city_db: ./data/GeoLite2-City.mmdb
     ai_analysis:
       enabled: true
       simulate: false
@@ -254,29 +249,19 @@ Examples:
 
 ### 4.6 `notifications.webhooks`
 
-Shared fields:
+Each channel supports:
 
 - `enabled`
   - Whether the channel is active.
+- `url`
+  - Incoming webhook URL.
 - `timeout_seconds`
   - HTTP timeout.
 
-Channel-specific fields:
+Additional DingTalk option:
 
-- `dingtalk.url`
-  - Incoming DingTalk webhook URL.
-- `dingtalk.at_all`
+- `at_all`
   - Whether the robot should mention everyone.
-- `wecom.url`
-  - Incoming WeCom webhook URL.
-- `feishu.url`
-  - Incoming Feishu webhook URL.
-- `telegram.bot_token`
-  - Telegram bot token. If empty, Server-Mate falls back to `TELEGRAM_BOT_TOKEN`.
-- `telegram.chat_id`
-  - Telegram destination chat ID. If empty, Server-Mate falls back to `TELEGRAM_CHAT_ID`.
-- `telegram.disable_web_page_preview`
-  - Whether Telegram link previews should be disabled.
 
 ### 4.7 `notifications.reports`
 
@@ -322,7 +307,7 @@ Monthly-specific:
 ### 4.8 `notifications.reports.ai_analysis`
 
 - `enabled`
-  - Enables AI health commentary for daily / weekly / monthly PDF reports, and also powers pre-send AI diagnosis for warning/critical alerts.
+  - Enables AI health commentary for daily / weekly / monthly PDF reports.
 - `simulate`
   - When `true`, the generator uses a built-in fallback summary instead of calling a real LLM API.
 - `endpoint`
@@ -334,7 +319,13 @@ Monthly-specific:
 - `timeout_seconds`
   - HTTP timeout for the AI request.
 
-In OpenClaw deployments, `OPENAI_API_KEY` is injected by the runtime. Do not ask operators to export it manually.
+Before generating reports with real AI analysis, export the API key:
+
+```bash
+export OPENAI_API_KEY="YOUR_REAL_API_KEY"
+```
+
+If you are using `systemd`, place the same variable in an Environment file or directly in the service unit.
 
 ### 4.9 `automation`
 
@@ -377,35 +368,7 @@ Global switch:
 - `command_template`
   - Shell template used for the restart command.
 
-## 5. Telegram Push Configuration
-
-Telegram can be enabled alongside DingTalk, WeCom, or Feishu.
-
-Minimal config example:
-
-```yaml
-notifications:
-  webhooks:
-    telegram:
-      enabled: true
-      bot_token: ""
-      chat_id: ""
-      timeout_seconds: 10
-```
-
-Credential rules:
-
-- If `bot_token` is empty, Server-Mate reads `TELEGRAM_BOT_TOKEN`.
-- If `chat_id` is empty, Server-Mate reads `TELEGRAM_CHAT_ID`.
-- Telegram uses the same Markdown alert body as other channels and automatically converts it into a Telegram-safe MarkdownV2 message.
-
-Recommended rollout:
-
-- Enable Telegram in parallel with DingTalk or WeCom first.
-- Trigger one test alert or run a report with `--send`.
-- Confirm the target chat renders titles, bullets, and download links correctly before making Telegram the only alert channel.
-
-## 6. Multi-Site Configuration Guide
+## 5. Multi-Site Configuration Guide
 
 Use `sites[]` when one host serves multiple domains or applications.
 
@@ -437,9 +400,9 @@ Operational notes:
 python3 scripts/report_generator.py --config config.yaml pdf --range daily --site site-a.example.com --json
 ```
 
-## 7. Guarded Automation Guide
+## 6. Guarded Automation Guide
 
-### 7.1 Start in Dry-Run
+### 6.1 Start in Dry-Run
 
 Strong recommendation:
 
@@ -454,7 +417,7 @@ With `dry_run: true`, Server-Mate will:
 - write audit rows into SQLite
 - skip the real shell execution
 
-### 7.2 Auto-Ban Rules
+### 6.2 Auto-Ban Rules
 
 Auto-ban is designed for suspicious IP bursts such as CC-style request spikes.
 
@@ -466,7 +429,7 @@ Rules to follow:
 - Do not disable the TTL release path unless an external controller such as fail2ban is managing expiry for you.
 - Review `max_active_bans` before turning on production bans.
 
-### 7.3 Auto-Heal Rules
+### 6.3 Auto-Heal Rules
 
 Auto-heal is intentionally conservative.
 
@@ -477,27 +440,27 @@ Rules to follow:
 - Do not reduce `cooldown_seconds` aggressively. The default one-hour lock exists to prevent restart storms.
 - If the same service continues failing after one restart window, prefer human intervention and incident escalation.
 
-## 8. Generating Reports Manually
+## 7. Generating Reports Manually
 
-### 8.1 Daily Markdown
+### 7.1 Daily Markdown
 
 ```bash
 python3 scripts/report_generator.py --config config.yaml daily --date 2026-03-26 --json
 ```
 
-### 8.2 Daily Markdown + Webhook Push
+### 7.2 Daily Markdown + Webhook Push
 
 ```bash
 python3 scripts/report_generator.py --config config.yaml daily --date 2026-03-26 --send
 ```
 
-### 8.3 Weekly PDF
+### 7.3 Weekly PDF
 
 ```bash
 python3 scripts/report_generator.py --config config.yaml pdf --range weekly --end-date 2026-03-26 --json
 ```
 
-### 8.4 Monthly PDF + Webhook Push
+### 7.4 Monthly PDF + Webhook Push
 
 ```bash
 python3 scripts/report_generator.py --config config.yaml pdf --range monthly --end-date 2026-03-31 --send
@@ -509,7 +472,7 @@ All three PDF modes now reuse the same final SaaS report layout:
 - Weekly: 7-day trend using the same visual style, real SQLite aggregation, and AI commentary
 - Monthly: 30-day trend using the same visual style, real SQLite aggregation, and AI commentary
 
-## 9. Automated Scheduling Guide
+## 8. Automated Scheduling Guide
 
 This is the recommended production pattern:
 
@@ -517,97 +480,131 @@ This is the recommended production pattern:
 - Run report generation as one-shot jobs.
 - Let cron or systemd control timing instead of embedding a complex scheduler into the report process.
 
-### 9.1 Open crontab
+### 8.1 Open crontab
 
 ```bash
 crontab -e
 ```
 
-### 9.2 Data Capture Every 10 Minutes
+### 8.2 Data Capture Every 10 Minutes
 
 This parses new access and error logs incrementally, refreshes in-memory state, and writes rollups into SQLite.
 
 ```cron
-*/10 * * * * /usr/bin/env bash -lc 'python3 ./scripts/server_agent.py --config ./config.yaml --once >> ./logs/server-mate-agent.log 2>&1'
+*/10 * * * * /usr/bin/env bash -lc 'cd /path/to/server-mate && python3 ./scripts/server_agent.py --config ./config.yaml --once >> ./logs/server-mate-agent.log 2>&1'
 ```
 
-### 9.3 Daily PDF Report at 01:00
+### 8.3 Daily PDF Report at 01:00
 
 This generates the previous day daily report and pushes it to the configured webhook channels.
 In multi-site mode, this single cron entry will loop over every configured site and emit one report per domain.
 
 ```cron
-0 1 * * * /usr/bin/env bash -lc 'python3 ./scripts/report_generator.py --config ./config.yaml pdf --range daily --send >> ./logs/server-mate-report.log 2>&1'
+0 1 * * * /usr/bin/env bash -lc 'cd /path/to/server-mate && python3 ./scripts/report_generator.py --config ./config.yaml pdf --range daily --send >> ./logs/server-mate-report.log 2>&1'
 ```
 
-### 9.4 Weekly PDF Report Every Monday at 01:10
+### 8.4 Weekly PDF Report Every Monday at 01:10
 
 ```cron
-10 1 * * 1 /usr/bin/env bash -lc 'python3 ./scripts/report_generator.py --config ./config.yaml pdf --range weekly --send >> ./logs/server-mate-report.log 2>&1'
+10 1 * * 1 /usr/bin/env bash -lc 'cd /path/to/server-mate && python3 ./scripts/report_generator.py --config ./config.yaml pdf --range weekly --send >> ./logs/server-mate-report.log 2>&1'
 ```
 
-### 9.5 Monthly PDF Report on the 1st at 01:20
+### 8.5 Monthly PDF Report on the 1st at 01:20
 
 ```cron
-20 1 1 * * /usr/bin/env bash -lc 'python3 ./scripts/report_generator.py --config ./config.yaml pdf --range monthly --send >> ./logs/server-mate-report.log 2>&1'
+20 1 1 * * /usr/bin/env bash -lc 'cd /path/to/server-mate && python3 ./scripts/report_generator.py --config ./config.yaml pdf --range monthly --send >> ./logs/server-mate-report.log 2>&1'
 ```
 
-### 9.6 Optional Daily Markdown Instead of PDF
+### 8.6 Optional Daily Markdown Instead of PDF
 
 If you prefer a lighter daily push:
 
 ```cron
-0 1 * * * /usr/bin/env bash -lc 'python3 ./scripts/report_generator.py --config ./config.yaml daily --send >> ./logs/server-mate-report.log 2>&1'
+0 1 * * * /usr/bin/env bash -lc 'cd /path/to/server-mate && python3 ./scripts/report_generator.py --config ./config.yaml daily --send >> ./logs/server-mate-report.log 2>&1'
 ```
 
-### 9.7 Recommended Log Files
+### 8.7 Recommended Log Files
 
 ```bash
+cd /path/to/server-mate
 mkdir -p ./logs ./reports
 touch ./logs/server-mate-agent.log ./logs/server-mate-report.log
 ```
 
-## 10. Using Systemd Service Management
+## 9. Scheduling with systemd
 
 Recommended when you want stronger process control than cron.
 
-### 10.1 Agent Service
+### 9.1 Generate a Workspace-Specific Service Unit
 
-Use the bundled template [`server-mate.service`](server-mate.service) as the starting point.
+Run this from the Server-Mate workspace root:
 
-If your workspace is not `~/server-mate`, change `WorkingDirectory=` first.
+```bash
+python3 ./scripts/server_agent.py --config ./config.yaml --generate-service
+```
 
-Suggested unit path:
+If you want to save the generated content first:
+
+```bash
+python3 ./scripts/server_agent.py --config ./config.yaml --generate-service > ./server-mate.service.txt
+```
+
+The generated output already uses the current absolute workspace path for:
+
+- `WorkingDirectory`
+- `ExecStart`
+- `config.yaml`
+
+### 9.2 Install the Generated Unit
+
+1. Run `--generate-service`.
+2. Copy the printed content into `/etc/systemd/system/server-mate.service`.
+3. Reload and enable the service.
+
+One-line install example:
+
+```bash
+python3 ./scripts/server_agent.py --config ./config.yaml --generate-service | sudo tee /etc/systemd/system/server-mate.service >/dev/null
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now server-mate.service
+sudo systemctl status server-mate.service
+```
+
+### 9.3 Manual Template
+
+If you prefer to paste a template manually, replace `<SERVER_MATE_DIR>` with your workspace path and `<PYTHON_BIN>` with the Python interpreter you want systemd to use.
 
 `/etc/systemd/system/server-mate.service`
 
 ```ini
 [Unit]
-Description=Server-Mate OpenClaw Agent
+Description=Server-Mate Agent
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/server-mate
-ExecStart=/usr/bin/env bash -lc 'mkdir -p ./logs ./reports && python3 ./scripts/server_agent.py --config ./config.yaml --daemon'
+WorkingDirectory=<SERVER_MATE_DIR>
+Environment=PYTHONUNBUFFERED=1
+ExecStart=<PYTHON_BIN> <SERVER_MATE_DIR>/scripts/server_agent.py --config <SERVER_MATE_DIR>/config.yaml --daemon
 Restart=always
 RestartSec=5
-KillSignal=SIGINT
-TimeoutStopSec=20
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-Enable it:
+Example placeholders:
 
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now server-mate.service
-```
+- `<SERVER_MATE_DIR>` -> `/home/opc/server-mate`
+- `<PYTHON_BIN>` -> `/usr/bin/python3`
 
-### 10.2 Report Service + Timer Example
+### 9.4 Optional Report Timer Example
+
+You can still keep report generation as one-shot timers while the agent itself runs as a daemon.
 
 `/etc/systemd/system/server-mate-weekly-report.service`
 
@@ -617,8 +614,8 @@ Description=Server-Mate Weekly PDF Report
 
 [Service]
 Type=oneshot
-WorkingDirectory=%h/server-mate
-ExecStart=/usr/bin/env bash -lc 'mkdir -p ./logs ./reports && python3 ./scripts/report_generator.py --config ./config.yaml pdf --range weekly --send >> ./logs/server-mate-report.log 2>&1'
+WorkingDirectory=<SERVER_MATE_DIR>
+ExecStart=<PYTHON_BIN> <SERVER_MATE_DIR>/scripts/report_generator.py --config <SERVER_MATE_DIR>/config.yaml pdf --range weekly --send
 ```
 
 `/etc/systemd/system/server-mate-weekly-report.timer`
@@ -642,17 +639,18 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now server-mate-weekly-report.timer
 ```
 
-### 10.3 When to Use Cron vs systemd
+### 9.5 When to Use Cron vs systemd
 
 - Use `cron` when you want the fastest deployment with simple one-line schedules.
-- Use `systemd timers` when you want stronger observability, restart policy, and native service management.
-- Use `server_agent.py --daemon` only when you explicitly want a resident process. For most production installs, `--once` plus cron is easier to audit and recover.
+- Use `systemd` when you want a resident collector with restart policy and `journalctl` visibility.
+- Use `systemd timers` when you want native service management for scheduled reports.
+- For most production installs, `--once` plus cron is still the easiest model to audit and recover.
 
-## 11. Exposing PDF Reports via Nginx
+## 10. Exposing PDF Reports via Nginx
 
 Assume:
 
-- `report_export_dir = ./reports`
+- `report_export_dir = /srv/reports/server-mate`
 - `public_base_url = https://ops.example.com/reports`
 
 Example Nginx config:
@@ -663,7 +661,7 @@ server {
     server_name ops.example.com;
 
     location /reports/ {
-        alias /absolute/path/to/your/workspace/reports/;
+        alias /srv/reports/server-mate/;
         autoindex off;
         add_header Cache-Control "no-cache";
     }
@@ -672,22 +670,22 @@ server {
 
 After reloading Nginx, a generated file such as:
 
-- `/absolute/path/to/your/workspace/reports/server-mate-example-com-weekly-2026-03-26-zh-cn.pdf`
+- `/srv/reports/server-mate/server-mate-example-com-weekly-20260326091015-zh.pdf`
 
 becomes:
 
-- `https://ops.example.com/reports/server-mate-example-com-weekly-2026-03-26-zh-cn.pdf`
+- `https://ops.example.com/reports/server-mate-example-com-weekly-20260326091015-zh.pdf`
 
 Default naming pattern:
 
-- `server-mate-{site}-{daily|weekly|monthly}-{YYYY-MM-DD}-{zh-cn|en}.pdf`
+- `server-mate-{site}-{daily|weekly|monthly}-{YYYYMMDDHHMMSS}-{zh|en}.pdf`
 
-## 12. Exposing PDF Reports via Apache
+## 11. Exposing PDF Reports via Apache
 
 ```apache
-Alias /reports/ "/absolute/path/to/your/workspace/reports/"
+Alias /reports/ "/srv/reports/server-mate/"
 
-<Directory "/absolute/path/to/your/workspace/reports/">
+<Directory "/srv/reports/server-mate/">
     Require all granted
     Options -Indexes
 </Directory>
@@ -705,14 +703,15 @@ or:
 sudo systemctl reload apache2
 ```
 
-## 13. Audit and Troubleshooting
+## 12. Audit and Troubleshooting
 
-### 13.1 Runtime Logs
+### 12.1 Runtime Logs
 
 Typical places to look first:
 
 - `./logs/server-mate-agent.log`
 - `./logs/server-mate-report.log`
+- `journalctl -u server-mate.service -f` when the collector is managed by systemd
 
 These are especially useful when:
 
@@ -720,7 +719,7 @@ These are especially useful when:
 - a log file was rotated and you want to confirm the collector recovered
 - Guarded Automation sent a dry-run or failed-action notice
 
-### 13.2 SQLite Audit Tables
+### 12.2 SQLite Audit Tables
 
 Guarded Automation history is persisted in:
 
@@ -732,11 +731,12 @@ Guarded Automation history is persisted in:
 Useful queries:
 
 ```bash
+cd /path/to/server-mate
 sqlite3 ./metrics.db "SELECT created_at, site, action_type, target, status, dry_run, reason FROM automation_actions ORDER BY id DESC LIMIT 20;"
 sqlite3 ./metrics.db "SELECT site, ip_address, created_at, expires_at, lifted_at, lift_status FROM banned_ips ORDER BY id DESC LIMIT 20;"
 ```
 
-### 13.3 Checklist
+### 12.3 Checklist
 
 - If Chinese text shows as squares in PDFs:
   - install `fonts-noto-cjk` or an equivalent CJK font package
@@ -760,7 +760,7 @@ sqlite3 ./metrics.db "SELECT site, ip_address, created_at, expires_at, lifted_at
   - query `automation_actions` to see whether the action was skipped by whitelist or cooldown
   - verify webhook notifications for `⚠️ 自动化干预通知`
 
-## 14. Next Suggested Steps
+## 13. Next Suggested Steps
 
 - Enable AI diagnosis for complex `error_event` alerts
 - Add GeoIP enrichment for country / region reports

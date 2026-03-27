@@ -10,20 +10,18 @@ import datetime as dt
 import hashlib
 import ipaddress
 import json
-import os
 import re
 import shlex
 import socket
 import sqlite3
 import statistics
 import subprocess
+import sys
 import time
 import traceback
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urlparse
-import urllib.error
-import urllib.request
 
 from webhook_center import SEVERITY_RANK, send_markdown_message
 
@@ -141,16 +139,16 @@ DEFAULT_CONFIG = {
         "collect_network_io": True,
     },
     "logs": {
-        "access_log": "./logs/access.log",
-        "error_log": "./logs/error.log",
+        "access_log": "./access.log",
+        "error_log": "./error.log",
     },
     "sites": [
         {
             "domain": "default",
             "site_host": "",
             "enabled": True,
-            "access_log": "./logs/access.log",
-            "error_log": "./logs/error.log",
+            "access_log": "./access.log",
+            "error_log": "./error.log",
         }
     ],
     "thresholds": {
@@ -167,7 +165,7 @@ DEFAULT_CONFIG = {
         "scan_404_distinct_uris": 10,
     },
     "storage": {
-        "database_file": "./metrics.db",
+        "database_file": "./server_agent.sqlite3",
         "rollup_minutes": [10, 60],
     },
     "notifications": {
@@ -187,13 +185,6 @@ DEFAULT_CONFIG = {
                 "enabled": False,
                 "url": "",
                 "timeout_seconds": 10,
-            },
-            "telegram": {
-                "enabled": False,
-                "bot_token": "",
-                "chat_id": "",
-                "timeout_seconds": 10,
-                "disable_web_page_preview": True,
             },
         },
         "alerts": {
@@ -388,6 +379,11 @@ def parse_args() -> argparse.Namespace:
         "--print-config",
         action="store_true",
         help="Print the normalized config and exit.",
+    )
+    parser.add_argument(
+        "--generate-service",
+        action="store_true",
+        help="Print a systemd service unit for the current workspace and exit.",
     )
     return parser.parse_args()
 
@@ -691,20 +687,9 @@ def normalize_config(config: dict[str, Any], config_path: Path) -> dict[str, Any
         resolve_config_path(base_dir, storage.get("database_file"))
     )
 
-    for channel_name in ("dingtalk", "wecom", "feishu", "telegram"):
+    for channel_name in ("dingtalk", "wecom", "feishu"):
         channel = webhooks.setdefault(channel_name, {})
         channel["enabled"] = bool(channel.get("enabled", False))
-        if channel_name == "telegram":
-            channel["bot_token"] = str(channel.get("bot_token") or "").strip()
-            channel["chat_id"] = str(channel.get("chat_id") or "").strip()
-            channel["disable_web_page_preview"] = bool(
-                channel.get("disable_web_page_preview", True)
-            )
-            channel["timeout_seconds"] = max(
-                int(channel.get("timeout_seconds", 10)),
-                1,
-            )
-            continue
         channel["url"] = str(channel.get("url") or "")
         channel["timeout_seconds"] = max(
             int(channel.get("timeout_seconds", 10)),
@@ -1967,223 +1952,6 @@ def alert_suggestion(alert: dict[str, Any]) -> str:
     return suggestions.get(str(alert.get("kind")), "请结合最近日志与服务状态继续排查。")
 
 
-def alert_output_language(config: dict[str, Any]) -> str:
-    reports = config.get("notifications", {}).get("reports", {})
-    return "en" if str(reports.get("report_language") or "").strip().lower() == "en" else "zh"
-
-
-def shorten_alert_field_text(
-    value: Any,
-    *,
-    strip_query: bool = False,
-    limit: int = 120,
-    fallback: str = "-",
-) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return fallback
-    if strip_query:
-        text = text.split("?", 1)[0].strip() or text
-    if len(text) > limit:
-        text = text[: limit - 3] + "..."
-    return text
-
-
-def resolve_shared_ai_settings(config: dict[str, Any]) -> dict[str, Any]:
-    reports = config.get("notifications", {}).get("reports", {})
-    ai_analysis = dict(reports.get("ai_analysis") or {})
-    return {
-        "enabled": bool(ai_analysis.get("enabled", True)),
-        "simulate": bool(ai_analysis.get("simulate", False)),
-        "endpoint": str(ai_analysis.get("endpoint") or ai_analysis.get("base_url") or "").strip(),
-        "model": str(ai_analysis.get("model") or "gpt-4o-mini").strip(),
-        "api_key_env": str(ai_analysis.get("api_key_env") or "OPENAI_API_KEY").strip(),
-        "timeout_seconds": max(int(ai_analysis.get("timeout_seconds", 20)), 3),
-    }
-
-
-def build_alert_ai_payload(
-    config: dict[str, Any],
-    alert: dict[str, Any],
-    system_snapshot: dict[str, Any],
-    access_summary: dict[str, Any],
-    error_summary: dict[str, Any],
-) -> dict[str, Any]:
-    top_uri = access_summary.get("top_uris", [{}])[0].get("uri") if access_summary.get("top_uris") else ""
-    top_error = (
-        error_summary.get("top_fingerprints", [{}])[0].get("fingerprint")
-        if error_summary.get("top_fingerprints")
-        else ""
-    )
-    return {
-        "host_id": config.get("agent", {}).get("host_id"),
-        "site": config.get("agent", {}).get("site"),
-        "severity": str(alert.get("severity") or "warning").upper(),
-        "kind": str(alert.get("kind") or "unknown"),
-        "request_count": int(access_summary.get("total_requests") or 0),
-        "error_count": int(error_summary.get("total_errors") or 0),
-        "http_404_count": int(access_summary.get("status_codes", {}).get("404", 0) or 0),
-        "http_5xx_count": sum(
-            int(count or 0)
-            for code, count in access_summary.get("status_codes", {}).items()
-            if str(code) in {"500", "502", "504"}
-        ),
-        "avg_response_ms": access_summary.get("avg_response_ms"),
-        "cpu_pct": system_snapshot.get("cpu_pct"),
-        "memory_pct": system_snapshot.get("memory_pct"),
-        "disk_free_bytes": system_snapshot.get("disk_free_bytes"),
-        "top_ip": alert.get("top_ip"),
-        "top_rpm": alert.get("top_rpm"),
-        "top_uri": shorten_alert_field_text(top_uri, strip_query=True, limit=90),
-        "top_error_fingerprint": shorten_alert_field_text(top_error, limit=220),
-        "suggestion": alert_suggestion(alert),
-    }
-
-
-def alert_ai_prompt(config: dict[str, Any], payload: dict[str, Any]) -> str:
-    if alert_output_language(config) == "en":
-        return (
-            "You are a senior Linux SRE. Based on the alert payload below, reply with exactly two short sentences and nothing else. "
-            "Sentence one must start with 'Cause:' and explain the issue in plain language. Sentence two must start with "
-            "'Action:' and give the next concrete troubleshooting step.\n\n"
-            f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
-        )
-    return (
-        "你是一名资深 Linux 运维专家。请根据下面的告警载荷，只输出两句话且不要输出其他内容。"
-        "第一句话必须以“原因分析：”开头，用大白话说明发生了什么。"
-        "第二句话必须以“行动建议：”开头，给出下一步最具体的排查或修复动作。\n\n"
-        f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
-    )
-
-
-def request_alert_ai_diagnosis(config: dict[str, Any], payload: dict[str, Any]) -> str | None:
-    settings = resolve_shared_ai_settings(config)
-    if not settings["enabled"] or settings["simulate"] or not settings["endpoint"]:
-        return None
-    api_key = os.getenv(settings["api_key_env"])
-    if not api_key:
-        return None
-    endpoint = settings["endpoint"].rstrip("/")
-    if endpoint.endswith("/v1"):
-        endpoint += "/chat/completions"
-    elif not endpoint.endswith("/chat/completions"):
-        endpoint += "/chat/completions"
-    body = {
-        "model": settings["model"],
-        "temperature": 0.1,
-        "messages": [
-            {"role": "system", "content": "You are an expert Linux SRE assistant."},
-            {"role": "user", "content": alert_ai_prompt(config, payload)},
-        ],
-    }
-    request = urllib.request.Request(
-        endpoint,
-        data=json.dumps(body).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=settings["timeout_seconds"]) as response:
-            data = json.loads(response.read().decode("utf-8"))
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
-        return None
-    try:
-        return str(data["choices"][0]["message"]["content"]).strip()
-    except (KeyError, IndexError, TypeError):
-        return None
-
-
-def simulate_alert_ai_diagnosis(config: dict[str, Any], alert: dict[str, Any], payload: dict[str, Any]) -> str:
-    kind = str(alert.get("kind") or "")
-    if kind == "suspicious_ip_burst":
-        return (
-            f"原因分析：同一个 IP 在短时间内高频请求，基本符合扫描或 CC 试探流量特征。"
-            f"\n行动建议：先核对该 IP 是否命中白名单，再结合 Nginx 访问日志和 WAF/防火墙规则做限速或临时封禁。"
-        )
-    if kind == "scan_or_route_breakage":
-        return (
-            "原因分析：404 在短窗口内明显升高，常见原因是有人盲扫后台、静态资源路径失效，或最近路由发布有误。"
-            "\n行动建议：优先检查热点 URI、最近发布记录和前端资源路径，再按来源 IP 判断是否需要拦截扫描流量。"
-        )
-    if kind == "server_error_burst":
-        return (
-            "原因分析：5xx 错误短时间集中出现，通常说明上游服务、PHP-FPM 或 Nginx 到应用之间已经出现异常。"
-            "\n行动建议：先看错误日志和 upstream 状态，再检查 PHP-FPM 进程、连接池和最近一次发布或配置变更。"
-        )
-    if kind == "latency_degradation":
-        return (
-            "原因分析：接口平均响应时间持续升高，通常是数据库、外部依赖或应用线程池出现排队。"
-            "\n行动建议：先看慢请求 URI 和慢 SQL，再核对上游接口耗时、CPU 峰值和连接池使用情况。"
-        )
-    if kind == "php_entrypoint_error":
-        return (
-            "原因分析：PHP 入口脚本没有正确命中，常见于站点根目录错误、伪静态配置问题或文件权限异常。"
-            "\n行动建议：检查站点根目录、rewrite 规则和 PHP 文件权限，确认入口文件在当前发布目录中真实存在。"
-        )
-    if kind == "cpu_high":
-        return (
-            "原因分析：CPU 使用率已经逼近或超过阈值，常见于突发流量、慢查询或异常爬虫占用。"
-            "\n行动建议：先定位高负载进程，再结合热点 URI 和数据库慢日志判断是否需要限流或优化查询。"
-        )
-    if kind == "memory_high":
-        return (
-            "原因分析：内存水位偏高，通常是 PHP-FPM、缓存、后台任务或对象泄漏导致占用持续堆积。"
-            "\n行动建议：优先查看主要进程 RSS 和最近发布变更，再评估是否需要回收缓存或调整进程数。"
-        )
-    if kind == "disk_low":
-        return (
-            "原因分析：磁盘可用空间已经接近告警线，通常是日志、备份或导出文件积压导致。"
-            "\n行动建议：先检查 logs、reports 和备份目录的增长情况，再决定清理历史文件还是扩容。"
-        )
-    return (
-        f"原因分析：当前告警与 {payload.get('kind') or 'unknown'} 相关，说明站点近期存在明显异常波动。"
-        f"\n行动建议：结合热点 URI、错误指纹和系统指标做交叉排查，并先处理最先出现的异常信号。"
-    )
-
-
-def normalize_alert_ai_diagnosis(text: str | None) -> dict[str, str] | None:
-    raw = str(text or "").strip()
-    if not raw:
-        return None
-    lines = [line.strip(" -•\t") for line in raw.replace("\r", "\n").splitlines() if line.strip()]
-    if len(lines) < 2:
-        sentences = [
-            item.strip()
-            for item in re.split(r"(?<=[。！？!?])\s*", raw)
-            if item.strip()
-        ]
-        lines = sentences[:2]
-    if not lines:
-        return None
-    analysis = lines[0]
-    suggestion = lines[1] if len(lines) > 1 else "行动建议：请优先查看最近访问日志、错误日志和服务状态。"
-    if not analysis.startswith(("原因分析：", "Cause:")):
-        analysis = f"原因分析：{analysis.lstrip('：: ')}"
-    if not suggestion.startswith(("行动建议：", "Action:")):
-        suggestion = f"行动建议：{suggestion.lstrip('：: ')}"
-    return {"analysis": analysis, "suggestion": suggestion}
-
-
-def build_alert_ai_diagnosis(
-    config: dict[str, Any],
-    alert: dict[str, Any],
-    system_snapshot: dict[str, Any],
-    access_summary: dict[str, Any],
-    error_summary: dict[str, Any],
-) -> dict[str, str] | None:
-    if severity_value(alert.get("severity", "warning")) < severity_value("warning"):
-        return None
-    settings = resolve_shared_ai_settings(config)
-    payload = build_alert_ai_payload(config, alert, system_snapshot, access_summary, error_summary)
-    ai_text = request_alert_ai_diagnosis(config, payload)
-    if not ai_text and settings["simulate"]:
-        ai_text = simulate_alert_ai_diagnosis(config, alert, payload)
-    return normalize_alert_ai_diagnosis(ai_text)
-
-
 def render_alert_markdown(
     config: dict[str, Any],
     alert: dict[str, Any],
@@ -2191,7 +1959,6 @@ def render_alert_markdown(
     system_snapshot: dict[str, Any],
     access_summary: dict[str, Any],
     error_summary: dict[str, Any],
-    ai_diagnosis: dict[str, str] | None = None,
 ) -> str:
     site = config["agent"]["site"]
     host_id = config["agent"]["host_id"]
@@ -2230,13 +1997,9 @@ def render_alert_markdown(
         )
 
     if top_uri and top_uri != "-":
-        detail_lines.append(
-            f"- 热点 URI: `{shorten_alert_field_text(top_uri, strip_query=True, limit=120)}`"
-        )
+        detail_lines.append(f"- 热点 URI: `{top_uri}`")
     if top_error:
-        detail_lines.append(
-            f"- 主要错误指纹: `{shorten_alert_field_text(top_error, limit=220)}`"
-        )
+        detail_lines.append(f"- 主要错误指纹: `{top_error}`")
     detail_lines.append(f"- 建议动作: {alert_suggestion(alert)}")
 
     lines = [
@@ -2250,15 +2013,6 @@ def render_alert_markdown(
         f"- 当前窗口错误数: {error_summary.get('total_errors', 0)}",
     ]
     lines.extend(detail_lines)
-    if ai_diagnosis:
-        lines.extend(
-            [
-                "",
-                "## 💡 AI 智能诊断",
-                f"- {ai_diagnosis['analysis']}",
-                f"- {ai_diagnosis['suggestion']}",
-            ]
-        )
     return "\n".join(lines)
 
 
@@ -2303,13 +2057,6 @@ def deliver_alerts(
                 continue
 
         title = f"Server-Mate 告警 | {config['agent']['site']} | {alert_label(alert)}"
-        ai_diagnosis = build_alert_ai_diagnosis(
-            config,
-            alert,
-            system_snapshot,
-            access_summary,
-            error_summary,
-        )
         markdown = render_alert_markdown(
             config,
             alert,
@@ -2317,7 +2064,6 @@ def deliver_alerts(
             system_snapshot,
             access_summary,
             error_summary,
-            ai_diagnosis,
         )
         channel_results = send_markdown_message(config, title, markdown, channels)
         success = any(result.get("success") for result in channel_results)
@@ -2329,7 +2075,6 @@ def deliver_alerts(
                 "severity": alert["severity"],
                 "success": success,
                 "cooldown_key": cooldown_key,
-                "ai_diagnosis": ai_diagnosis,
                 "channels": channel_results,
             }
         )
@@ -3659,17 +3404,53 @@ def sanitize_config_for_output(config: dict[str, Any], config_path: Path) -> dic
         channel = output.get("notifications", {}).get("webhooks", {}).get(channel_name)
         if isinstance(channel, dict) and channel.get("url"):
             channel["url"] = mask_secret_url(str(channel["url"]))
-    telegram = output.get("notifications", {}).get("webhooks", {}).get("telegram")
-    if isinstance(telegram, dict):
-        if telegram.get("bot_token"):
-            telegram["bot_token"] = mask_secret_url(str(telegram["bot_token"]))
-        if telegram.get("chat_id"):
-            telegram["chat_id"] = mask_secret_url(str(telegram["chat_id"]))
     output["meta"] = {
         "config_path": str(config_path.resolve()),
         "yaml_parser_available": yaml is not None,
     }
     return output
+
+
+def quote_systemd_value(value: str) -> str:
+    text = str(value)
+    if not text:
+        return '""'
+    if any(char.isspace() for char in text) or any(char in text for char in ('"', "\\")):
+        escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    return text
+
+
+def build_systemd_service_unit(config_path: Path) -> str:
+    workspace_dir = config_path.parent.resolve()
+    script_path = Path(__file__).resolve()
+    python_path = Path(sys.executable).resolve() if sys.executable else Path("/usr/bin/python3")
+    exec_parts = [
+        quote_systemd_value(str(python_path)),
+        quote_systemd_value(str(script_path)),
+        "--config",
+        quote_systemd_value(str(config_path.resolve())),
+        "--daemon",
+    ]
+    lines = [
+        "# Copy this unit to /etc/systemd/system/server-mate.service",
+        "[Unit]",
+        "Description=Server-Mate Agent",
+        "After=network-online.target",
+        "Wants=network-online.target",
+        "",
+        "[Service]",
+        "Type=simple",
+        f"WorkingDirectory={quote_systemd_value(str(workspace_dir))}",
+        "Environment=PYTHONUNBUFFERED=1",
+        f"ExecStart={' '.join(exec_parts)}",
+        "Restart=always",
+        "RestartSec=5",
+        "",
+        "[Install]",
+        "WantedBy=multi-user.target",
+    ]
+    return "\n".join(lines) + "\n"
 
 
 def resolve_mode(args: argparse.Namespace, config: dict[str, Any]) -> str:
@@ -3727,8 +3508,12 @@ def run_daemon(
 def main() -> int:
     args = parse_args()
     config_path = args.config.resolve()
+
+    if args.generate_service:
+        print(build_systemd_service_unit(config_path), end="")
+        return 0
+
     config, config_generated = load_config(config_path)
-    mode = resolve_mode(args, config)
 
     if args.print_config:
         print(
@@ -3740,6 +3525,7 @@ def main() -> int:
         )
         return 0
 
+    mode = resolve_mode(args, config)
     state_file = Path(config["agent"]["state_file"])
     database_file = Path(config["storage"]["database_file"])
     state = migrate_state_shape(load_state(state_file), config)

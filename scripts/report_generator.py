@@ -71,9 +71,6 @@ PDF_FONT_PATHS = [
     Path(__file__).resolve().parents[1] / "assets" / "NotoSansSC-VF.ttf",
 ]
 
-GEOIP_CITY_DB_DOWNLOAD_URL = "https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-City.mmdb"
-GEOIP_DOWNLOAD_CHUNK_BYTES = 256 * 1024
-
 TRANSLATIONS = {
     "zh": {
         "daily_title": "Server-Mate 日报",
@@ -839,73 +836,12 @@ def resolve_geoip_city_db(config: dict[str, Any]) -> Path | None:
     raw_path = str(reports.get("geoip_city_db") or "").strip()
     if not raw_path:
         return None
-    return Path(raw_path).expanduser()
-
-
-def download_geoip_city_db(target_path: Path) -> bool:
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = target_path.with_suffix(target_path.suffix + ".download")
-    request = urllib.request.Request(
-        GEOIP_CITY_DB_DOWNLOAD_URL,
-        headers={"User-Agent": "Server-Mate/1.2.0"},
-        method="GET",
-    )
-
-    try:
-        print(
-            f"[GeoIP] Downloading GeoLite2 City database -> {target_path}",
-            file=sys.stderr,
-            flush=True,
-        )
-        downloaded = 0
-        next_progress_mark = 0
-        with urllib.request.urlopen(request, timeout=60) as response, temp_path.open("wb") as handle:
-            total_bytes = int(response.headers.get("Content-Length") or 0)
-            while True:
-                chunk = response.read(GEOIP_DOWNLOAD_CHUNK_BYTES)
-                if not chunk:
-                    break
-                handle.write(chunk)
-                downloaded += len(chunk)
-                if downloaded >= next_progress_mark:
-                    if total_bytes > 0:
-                        progress = (downloaded / total_bytes) * 100
-                        print(
-                            f"[GeoIP] {progress:5.1f}% ({downloaded / (1024 * 1024):.2f} / {total_bytes / (1024 * 1024):.2f} MB)",
-                            file=sys.stderr,
-                            flush=True,
-                        )
-                    else:
-                        print(
-                            f"[GeoIP] Downloaded {downloaded / (1024 * 1024):.2f} MB",
-                            file=sys.stderr,
-                            flush=True,
-                        )
-                    next_progress_mark = downloaded + (1024 * 1024)
-        temp_path.replace(target_path)
-        print(f"[GeoIP] Ready: {target_path}", file=sys.stderr, flush=True)
-        return True
-    except Exception as exc:
-        print(f"[GeoIP] Download failed: {exc}", file=sys.stderr, flush=True)
-        try:
-            if temp_path.exists():
-                temp_path.unlink()
-        except OSError:
-            pass
-        return False
-
-
-def ensure_geoip_city_db(config: dict[str, Any]) -> Path | None:
-    db_path = resolve_geoip_city_db(config)
-    if not db_path:
-        return None
-    if db_path.exists():
-        return db_path
-    return db_path if download_geoip_city_db(db_path) else None
+    path = Path(raw_path).expanduser()
+    return path if path.exists() else None
 
 
 def open_geoip_reader(config: dict[str, Any]) -> Any | None:
-    db_path = ensure_geoip_city_db(config)
+    db_path = resolve_geoip_city_db(config)
     if not db_path:
         return None
     try:
@@ -6311,23 +6247,6 @@ def fallback_table_rows(column_count: int, config: dict[str, Any]) -> list[list[
     return [[t(config, "no_data")] + ["-"] * (column_count - 1)]
 
 
-def sanitize_long_table_text(
-    value: Any,
-    *,
-    strip_query: bool = False,
-    limit: int = 55,
-    fallback: str = "-",
-) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return fallback
-    if strip_query:
-        text = text.split("?", 1)[0].strip() or text
-    if len(text) > limit:
-        text = text[: limit - 3] + "..."
-    return text
-
-
 def build_status_distribution_map(report: dict[str, Any]) -> dict[str, int]:
     distribution: dict[str, int] = {}
     for row in report.get("status_codes", []):
@@ -6349,7 +6268,7 @@ def build_hot_page_rows_from_report(report: dict[str, Any], config: dict[str, An
         uv_count = row.get("uv_count")
         rows.append(
             [
-                sanitize_long_table_text(row.get("item"), strip_query=True, limit=55),
+                str(row.get("item") or "-"),
                 format_number(request_count),
                 format_number(uv_count) if uv_count is not None else "-",
                 format_number(request_count),
@@ -6362,7 +6281,7 @@ def build_hot_page_rows_from_report(report: dict[str, Any], config: dict[str, An
         request_count = int(row.get("count") or 0)
         rows.append(
             [
-                sanitize_long_table_text(row.get("item"), strip_query=True, limit=55),
+                str(row.get("item") or "-"),
                 format_number(request_count),
                 "-",
                 format_number(request_count),
@@ -6378,7 +6297,7 @@ def build_hot_source_rows_from_report(report: dict[str, Any], config: dict[str, 
         request_count = int(row.get("request_count") or row.get("count") or 0)
         rows.append(
             [
-                sanitize_long_table_text(row.get("item"), strip_query=True, limit=55),
+                str(row.get("item") or "-"),
                 format_number(request_count),
                 format_number(request_count),
                 format_bytes(int(row.get("bytes_out") or 0)) if int(row.get("bytes_out") or 0) > 0 else "-",
@@ -6763,31 +6682,20 @@ def normalize_filename_part(value: str | None, fallback: str) -> str:
     return text or fallback
 
 
-def format_report_timestamp(config: dict[str, Any], generated_at: dt.datetime | None = None) -> str:
-    timezone = get_timezone(config)
-    timestamp = generated_at or dt.datetime.now(timezone)
-    if timestamp.tzinfo is None:
-        timestamp = timestamp.replace(tzinfo=timezone)
-    else:
-        timestamp = timestamp.astimezone(timezone)
-    return timestamp.strftime("%Y%m%d%H%M%S")
-
-
 def build_report_filename(
     config: dict[str, Any],
     report_kind: str,
     report_date: dt.date,
     suffix: str,
     site_name: str | None = None,
-    generated_at: dt.datetime | None = None,
 ) -> str:
     language = report_language(config)
+    locale = "zh-cn" if language == "zh" else "en"
     agent = config.get("agent", {})
     resolved_site = site_name or agent.get("site") or agent.get("site_host") or agent.get("host_id") or "server"
     site_slug = normalize_filename_part(str(resolved_site), "server")
     report_slug = normalize_filename_part(report_kind, "report")
-    timestamp = format_report_timestamp(config, generated_at)
-    return f"server-mate-{site_slug}-{report_slug}-{timestamp}-{language}.{suffix}"
+    return f"server-mate-{site_slug}-{report_slug}-{report_date.isoformat()}-{locale}.{suffix}"
 
 
 def resolve_output_path(
@@ -6796,12 +6704,11 @@ def resolve_output_path(
     report_date: dt.date,
     suffix: str,
     site_name: str | None = None,
-    generated_at: dt.datetime | None = None,
 ) -> Path:
     scope = resolve_report_scope(config, report_kind)
     output_dir = Path(scope.get("output_dir") or "./reports")
     output_dir.mkdir(parents=True, exist_ok=True)
-    return output_dir / build_report_filename(config, report_kind, report_date, suffix, site_name, generated_at)
+    return output_dir / build_report_filename(config, report_kind, report_date, suffix, site_name)
 
 
 def resolve_requested_sites(config: dict[str, Any], site_name: str | None) -> list[dict[str, Any]]:
@@ -6829,10 +6736,9 @@ def resolve_site_output_path(
     suffix: str,
     site_name: str,
     multi_site: bool,
-    generated_at: dt.datetime | None = None,
 ) -> Path:
     if output_override is None:
-        return resolve_output_path(config, report_kind, report_date, suffix, site_name, generated_at)
+        return resolve_output_path(config, report_kind, report_date, suffix, site_name)
 
     if not multi_site and output_override.suffix.lower() == f".{suffix.lower()}":
         output_override.parent.mkdir(parents=True, exist_ok=True)
@@ -6840,7 +6746,7 @@ def resolve_site_output_path(
 
     output_dir = output_override if output_override.suffix == "" else output_override.parent
     output_dir.mkdir(parents=True, exist_ok=True)
-    return output_dir / build_report_filename(config, report_kind, report_date, suffix, site_name, generated_at)
+    return output_dir / build_report_filename(config, report_kind, report_date, suffix, site_name)
 
 
 def export_report_file(config: dict[str, Any], report_kind: str, local_path: Path) -> tuple[Path, str | None]:
@@ -6859,86 +6765,6 @@ def export_report_file(config: dict[str, Any], report_kind: str, local_path: Pat
     return exported_path, public_url
 
 
-def report_notice_labels(config: dict[str, Any]) -> dict[str, str]:
-    if report_language(config) == "zh":
-        return {
-            "http_status": "HTTP 状态码",
-            "top_pages": "热门页面 Top 3",
-            "top_ips": "访问 IP Top 3",
-            "download": "下载链接",
-            "local_file": "报告文件",
-            "local_only": "未配置 public_base_url，当前仅保存在工作目录。",
-            "no_data": "暂无数据",
-            "requests_unit": "次",
-        }
-    return {
-        "http_status": "HTTP Status",
-        "top_pages": "Top 3 Pages",
-        "top_ips": "Top 3 Client IPs",
-        "download": "Download",
-        "local_file": "Report File",
-        "local_only": "No public_base_url configured; the file is available only in the workspace.",
-        "no_data": "No data",
-        "requests_unit": "req",
-    }
-
-
-def build_report_status_summary(report: dict[str, Any]) -> str:
-    status_counts = {"2xx": 0, "3xx": 0, "4xx": 0, "5xx": 0}
-    for row in report.get("status_families") or []:
-        family = str(row.get("item") or "").lower()
-        if family in status_counts:
-            status_counts[family] = int(row.get("count") or 0)
-
-    if not any(status_counts.values()):
-        for row in report.get("status_codes") or []:
-            code = str(row.get("item") or "")
-            count = int(row.get("count") or 0)
-            if code.startswith("2"):
-                status_counts["2xx"] += count
-            elif code.startswith("3"):
-                status_counts["3xx"] += count
-            elif code.startswith("4"):
-                status_counts["4xx"] += count
-            elif code.startswith("5"):
-                status_counts["5xx"] += count
-
-    ordered_items = [("2xx", status_counts["2xx"]), ("3xx", status_counts["3xx"]), ("4xx", status_counts["4xx"]), ("5xx", status_counts["5xx"])]
-    return " | ".join(f"{family} {format_number(count)}" for family, count in ordered_items)
-
-
-def build_report_top_page_lines(
-    report: dict[str, Any],
-    config: dict[str, Any],
-    limit: int = 3,
-) -> list[str]:
-    labels = report_notice_labels(config)
-    lines: list[str] = []
-    for row in (report.get("top_uri_details") or report.get("top_uris") or [])[:limit]:
-        request_count = int(row.get("request_count") or row.get("count") or 0)
-        traffic_bytes = int(row.get("bytes_out") or 0)
-        path_text = sanitize_long_table_text(row.get("item"), strip_query=True, limit=55)
-        detail_parts = [f"{format_number(request_count)} {labels['requests_unit']}"]
-        if traffic_bytes > 0:
-            detail_parts.append(format_bytes(traffic_bytes))
-        lines.append(f"- `{path_text}` | {' / '.join(detail_parts)}")
-    return lines or [f"- {labels['no_data']}"]
-
-
-def build_report_top_ip_lines(
-    report: dict[str, Any],
-    config: dict[str, Any],
-    limit: int = 3,
-) -> list[str]:
-    labels = report_notice_labels(config)
-    lines: list[str] = []
-    for row in (report.get("top_client_ips") or [])[:limit]:
-        request_count = int(row.get("request_count") or row.get("count") or 0)
-        ip_address = str(row.get("item") or "-")
-        lines.append(f"- `{ip_address}` | {format_number(request_count)} {labels['requests_unit']}")
-    return lines or [f"- {labels['no_data']}"]
-
-
 def send_report_notice(
     config: dict[str, Any],
     report_kind: str,
@@ -6950,7 +6776,6 @@ def send_report_notice(
 ) -> list[dict[str, Any]]:
     scope = resolve_report_scope(config, report_kind)
     selected_channels = channels or scope.get("channels", [])
-    labels = report_notice_labels(config)
     title_key = f"{report_kind}_title"
     title = f"{t(config, title_key)} | {report['meta']['site']} | {report['meta']['report_date']}"
     lines = [
@@ -6959,21 +6784,16 @@ def send_report_notice(
         f"- {t(config, 'window')}: {report['meta']['window_start']} -> {report['meta']['window_end']}",
         f"- {t(config, 'pv')}/{t(config, 'uv')}: {format_number(report['traffic']['pv'])} / {format_number(report['traffic']['uv'])}",
         f"- {t(config, 'requests')}/{t(config, 'slow_requests')}: {format_number(report['traffic']['request_count'])} / {format_number(report['traffic']['slow_request_count'])}",
-        f"- {t(config, 'peak_qps')}/{t(config, 'avg_response')}: {format_number(report['traffic']['qps_peak'], 2)} / {format_number(report['traffic']['avg_response_ms'], 2)} ms",
-        f"- {labels['http_status']}: {build_report_status_summary(report)}",
-        "",
-        f"## {labels['top_pages']}",
-        *build_report_top_page_lines(report, config, 3),
-        "",
-        f"## {labels['top_ips']}",
-        *build_report_top_ip_lines(report, config, 3),
-        "",
+        f"- {t(config, 'peak_qps')}: {format_number(report['traffic']['qps_peak'], 4)}",
+        f"- {t(config, 'report_path')}: `{local_path}`",
     ]
+    if exported_path != local_path:
+        lines.append(f"- export path: `{exported_path}`")
     if public_url:
-        lines.append(f"- {labels['download']}: [{exported_path.name}]({public_url})")
+        lines.append(f"- {t(config, 'download_url')}: [open report]({public_url})")
     else:
-        lines.append(f"- {labels['local_file']}: `{exported_path.name}`")
-        lines.append(f"- {labels['download']}: {labels['local_only']}")
+        lines.append(f"- {t(config, 'download_url')}: {t(config, 'local_only')}")
+    lines.extend(["", f"> {t(config, 'report_note')}"])
     return send_markdown_message(config, title, "\n".join(lines), selected_channels)
 
 
@@ -7006,7 +6826,6 @@ def main() -> int:
             report_kind = getattr(args, "range", "weekly")
             default_offset = -1 if report_kind == "daily" else 0
             report_date = parse_local_date(getattr(args, "end_date", None), timezone, default_offset)
-            generated_at = dt.datetime.now(timezone)
             multi_site = len(selected_sites) > 1
             payloads: list[dict[str, Any]] = []
             for site in selected_sites:
@@ -7020,7 +6839,6 @@ def main() -> int:
                     "pdf",
                     str(report.get("meta", {}).get("site") or ""),
                     multi_site,
-                    generated_at,
                 )
                 local_path = render_pdf(report, site_config, output_path)
                 exported_path, public_url = export_report_file(site_config, report_kind, local_path)
@@ -7053,7 +6871,6 @@ def main() -> int:
 
         timezone = get_timezone(config)
         report_date = parse_local_date(getattr(args, "date", None), timezone, -1)
-        generated_at = dt.datetime.now(timezone)
         multi_site = len(selected_sites) > 1
         payloads: list[dict[str, Any]] = []
         rendered_markdowns: list[str] = []
@@ -7069,7 +6886,6 @@ def main() -> int:
                 "md",
                 str(report.get("meta", {}).get("site") or ""),
                 multi_site,
-                generated_at,
             )
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(markdown, encoding="utf-8")
