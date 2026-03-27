@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any, Iterable
 
 
-SUPPORTED_CHANNELS = ("dingtalk", "wecom", "feishu")
+SUPPORTED_CHANNELS = ("dingtalk", "wecom", "feishu", "telegram")
 SEVERITY_RANK = {"info": 0, "warning": 1, "critical": 2}
 
 
@@ -39,7 +41,16 @@ def get_active_channels(
             continue
         if not channel_config.get("enabled"):
             continue
-        if not str(channel_config.get("url") or "").strip():
+        if name == "telegram":
+            bot_token = str(channel_config.get("bot_token") or os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+            chat_id = str(channel_config.get("chat_id") or os.getenv("TELEGRAM_CHAT_ID") or "").strip()
+            if not bot_token or not chat_id:
+                continue
+            channel_config = dict(channel_config)
+            channel_config["bot_token"] = bot_token
+            channel_config["chat_id"] = chat_id
+            channel_config["url"] = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        elif not str(channel_config.get("url") or "").strip():
             continue
         active.append((name, channel_config))
     return active
@@ -72,6 +83,13 @@ def build_markdown_payload(
     markdown: str,
     channel_config: dict[str, Any],
 ) -> dict[str, Any]:
+    if channel == "telegram":
+        return {
+            "chat_id": str(channel_config.get("chat_id") or ""),
+            "text": telegram_markdown(title, markdown),
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": bool(channel_config.get("disable_web_page_preview", True)),
+        }
     if channel == "dingtalk":
         return {
             "msgtype": "markdown",
@@ -111,7 +129,26 @@ def response_is_success(
         return str(body_json.get("errcode")) == "0"
     if channel == "feishu":
         return str(body_json.get("code")) == "0"
+    if channel == "telegram":
+        return bool(body_json.get("ok"))
     return False
+
+
+def telegram_markdown(title: str, markdown: str) -> str:
+    lines: list[str] = [f"*{title.replace('*', '')}*"]
+    for raw_line in markdown.strip().splitlines():
+        line = raw_line.rstrip()
+        if not line:
+            lines.append("")
+            continue
+        if line.startswith("# "):
+            lines.append(f"*{line[2:].strip().replace('*', '')}*")
+            continue
+        if line.startswith("## "):
+            lines.append(f"*{line[3:].strip().replace('*', '')}*")
+            continue
+        lines.append(line.replace("`", ""))
+    return "\n".join(lines).strip()
 
 
 def post_json(
@@ -175,4 +212,3 @@ def send_markdown_message(
         )
         results.append(response)
     return results
-

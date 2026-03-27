@@ -10,6 +10,7 @@ import datetime as dt
 import hashlib
 import ipaddress
 import json
+import os
 import re
 import shlex
 import socket
@@ -21,6 +22,8 @@ import time
 import traceback
 from pathlib import Path
 from typing import Any, Iterable
+import urllib.error
+import urllib.request
 from urllib.parse import urlparse
 
 from webhook_center import SEVERITY_RANK, send_markdown_message
@@ -56,6 +59,14 @@ APACHE_ERROR_RE = re.compile(
     r"^\[(?P<timestamp>[^\]]+)\] \[(?P<module>[^\]]+)\]"
     r"(?: \[pid (?P<pid>\d+)(?::tid [^\]]+)?\])?"
     r"(?: \[client (?P<client>[^\]]+)\])? (?P<message>.*)$"
+)
+
+SSH_FAILED_PASSWORD_RE = re.compile(
+    r"Failed password for (?:invalid user )?(?P<username>\S+) from (?P<client_ip>\S+) port (?P<port>\d+)",
+    re.IGNORECASE,
+)
+AUTH_LOG_PREFIX_RE = re.compile(
+    r"^(?P<timestamp>[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+\S+\s+(?P<program>[\w.@/-]+)(?:\[(?P<pid>\d+)\])?:\s+(?P<message>.*)$"
 )
 
 IP_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
@@ -141,6 +152,7 @@ DEFAULT_CONFIG = {
     "logs": {
         "access_log": "./access.log",
         "error_log": "./error.log",
+        "auth_log": "",
     },
     "sites": [
         {
@@ -163,9 +175,11 @@ DEFAULT_CONFIG = {
         "server_error_count": 20,
         "scan_404_count": 20,
         "scan_404_distinct_uris": 10,
+        "ssh_bruteforce_window_minutes": 5,
+        "ssh_bruteforce_failures": 10,
     },
     "storage": {
-        "database_file": "./server_agent.sqlite3",
+        "database_file": "./metrics.db",
         "rollup_minutes": [10, 60],
     },
     "notifications": {
@@ -185,6 +199,13 @@ DEFAULT_CONFIG = {
                 "enabled": False,
                 "url": "",
                 "timeout_seconds": 10,
+            },
+            "telegram": {
+                "enabled": False,
+                "bot_token": "",
+                "chat_id": "",
+                "timeout_seconds": 10,
+                "disable_web_page_preview": True,
             },
         },
         "alerts": {
@@ -265,6 +286,12 @@ DEFAULT_STATE = {
     "sites": {},
     "system_history": {
         "snapshots": [],
+    },
+    "host_security": {
+        "cursors": {},
+        "history": {
+            "ssh_auth_events": [],
+        },
     },
     "delivery": {
         "alert_cooldowns": {},
@@ -479,6 +506,34 @@ def default_site_state() -> dict[str, Any]:
     }
 
 
+def ensure_host_security_state(state: dict[str, Any]) -> dict[str, Any]:
+    host_state = state.setdefault("host_security", {})
+    host_state.setdefault("cursors", {})
+    history = host_state.setdefault("history", {})
+    history.setdefault("ssh_auth_events", [])
+    return host_state
+
+
+def detect_default_auth_log_path() -> str:
+    os_release = Path("/etc/os-release")
+    distro_hints = ""
+    if os_release.exists():
+        try:
+            distro_hints = os_release.read_text(encoding="utf-8", errors="replace").lower()
+        except OSError:
+            distro_hints = ""
+
+    if "ubuntu" in distro_hints or "debian" in distro_hints:
+        return "/var/log/auth.log"
+    if any(name in distro_hints for name in ("centos", "rhel", "rocky", "alma", "fedora")):
+        return "/var/log/secure"
+
+    for candidate in ("/var/log/auth.log", "/var/log/secure"):
+        if Path(candidate).exists():
+            return candidate
+    return "/var/log/auth.log"
+
+
 def normalize_site_entry(
     raw_site: Any,
     index: int,
@@ -645,6 +700,12 @@ def normalize_config(config: dict[str, Any], config_path: Path) -> dict[str, Any
         system_metrics.get("collect_network_io", True)
     )
 
+    raw_auth_log = str(logs.get("auth_log") or "").strip()
+    if raw_auth_log:
+        logs["auth_log"] = str(resolve_config_path(base_dir, raw_auth_log))
+    else:
+        logs["auth_log"] = detect_default_auth_log_path()
+
     normalize_sites_config(config, base_dir)
 
     thresholds["summary_window_minutes"] = max(
@@ -676,6 +737,14 @@ def normalize_config(config: dict[str, Any], config_path: Path) -> dict[str, Any
         int(thresholds.get("scan_404_distinct_uris", 10)),
         1,
     )
+    thresholds["ssh_bruteforce_window_minutes"] = max(
+        int(thresholds.get("ssh_bruteforce_window_minutes", 5)),
+        1,
+    )
+    thresholds["ssh_bruteforce_failures"] = max(
+        int(thresholds.get("ssh_bruteforce_failures", 10)),
+        1,
+    )
 
     rollup_minutes = storage.get("rollup_minutes", [10, 60])
     if not isinstance(rollup_minutes, list) or not rollup_minutes:
@@ -687,14 +756,22 @@ def normalize_config(config: dict[str, Any], config_path: Path) -> dict[str, Any
         resolve_config_path(base_dir, storage.get("database_file"))
     )
 
-    for channel_name in ("dingtalk", "wecom", "feishu"):
+    for channel_name in ("dingtalk", "wecom", "feishu", "telegram"):
         channel = webhooks.setdefault(channel_name, {})
         channel["enabled"] = bool(channel.get("enabled", False))
-        channel["url"] = str(channel.get("url") or "")
         channel["timeout_seconds"] = max(
             int(channel.get("timeout_seconds", 10)),
             1,
         )
+        if channel_name == "telegram":
+            channel["bot_token"] = str(channel.get("bot_token") or "").strip()
+            channel["chat_id"] = str(channel.get("chat_id") or "").strip()
+            channel["disable_web_page_preview"] = bool(
+                channel.get("disable_web_page_preview", True)
+            )
+            channel["url"] = ""
+        else:
+            channel["url"] = str(channel.get("url") or "").strip()
         if channel_name == "dingtalk":
             channel["at_all"] = bool(channel.get("at_all", False))
 
@@ -933,6 +1010,7 @@ def migrate_state_shape(state: dict[str, Any], config: dict[str, Any]) -> dict[s
 
     migrated.setdefault("system_history", {})
     migrated["system_history"].setdefault("snapshots", [])
+    ensure_host_security_state(migrated)
     return migrated
 
 
@@ -1258,6 +1336,22 @@ def parse_error_timestamp(raw: str, default_timezone: dt.tzinfo) -> dt.datetime 
     return None
 
 
+def parse_auth_timestamp(
+    raw: str,
+    default_timezone: dt.tzinfo,
+    reference_time: dt.datetime | None = None,
+) -> dt.datetime | None:
+    try:
+        parsed = dt.datetime.strptime(raw, "%b %d %H:%M:%S")
+    except ValueError:
+        return None
+    now_local = (reference_time or utcnow()).astimezone(default_timezone)
+    candidate = parsed.replace(year=now_local.year, tzinfo=default_timezone)
+    if candidate - now_local > dt.timedelta(days=1):
+        candidate = candidate.replace(year=now_local.year - 1)
+    return candidate.astimezone(dt.timezone.utc)
+
+
 def parse_request(request: str) -> tuple[str | None, str | None, str | None]:
     if not request or request == "-":
         return None, None, None
@@ -1469,6 +1563,45 @@ def parse_error_line(
     }
 
 
+def parse_auth_log_line(
+    line: str,
+    host_id: str,
+    default_timezone: dt.tzinfo,
+    reference_time: dt.datetime | None = None,
+) -> dict[str, Any] | None:
+    stripped = line.lstrip("\ufeff").strip()
+    prefix_match = AUTH_LOG_PREFIX_RE.match(stripped)
+    if not prefix_match:
+        return None
+    message = prefix_match.group("message") or ""
+    failed_match = SSH_FAILED_PASSWORD_RE.search(message)
+    if not failed_match:
+        return None
+    timestamp = parse_auth_timestamp(
+        prefix_match.group("timestamp"),
+        default_timezone,
+        reference_time=reference_time,
+    )
+    if timestamp is None:
+        return None
+    return {
+        "event_type": "ssh_auth_event",
+        "host_id": host_id,
+        "site": HOST_METRIC_SITE,
+        "ts": timestamp.isoformat(),
+        "timestamp": timestamp,
+        "program": str(prefix_match.group("program") or "sshd"),
+        "pid": prefix_match.group("pid"),
+        "client_ip": str(failed_match.group("client_ip") or ""),
+        "username": str(failed_match.group("username") or "unknown"),
+        "port": int(failed_match.group("port") or 0),
+        "auth_result": "failed_password",
+        "fingerprint": "ssh_failed_password",
+        "message": message,
+        "raw": line.rstrip("\n"),
+    }
+
+
 def serialize_events(events: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     serialized = []
     for event in events:
@@ -1505,6 +1638,17 @@ def prune_history(state: dict[str, Any], config: dict[str, Any], now: dt.datetim
         if timestamp and timestamp >= cutoff:
             trimmed_system.append(item)
     state["system_history"]["snapshots"] = trimmed_system
+
+    host_security_state = ensure_host_security_state(state)
+    ssh_events = host_security_state.get("history", {}).get("ssh_auth_events", [])
+    trimmed_ssh_events = []
+    for item in ssh_events:
+        timestamp = parse_iso_ts(item.get("ts"))
+        if timestamp and timestamp >= cutoff:
+            trimmed_ssh_events.append(item)
+    if len(trimmed_ssh_events) > max_events:
+        trimmed_ssh_events = trimmed_ssh_events[-max_events:]
+    host_security_state["history"]["ssh_auth_events"] = trimmed_ssh_events
 
 
 def filter_window(
@@ -1741,6 +1885,53 @@ def summarize_errors_window(
     }
 
 
+def summarize_ssh_auth_window(
+    events: list[dict[str, Any]],
+    window_start: dt.datetime,
+    window_end: dt.datetime,
+    brute_force_threshold: int,
+) -> dict[str, Any]:
+    window_events = filter_window(events, window_start, window_end)
+    if not window_events:
+        return {
+            "window_start": window_start.isoformat(),
+            "window_end": window_end.isoformat(),
+            "failed_attempts": 0,
+            "top_source_ips": [],
+            "top_usernames": [],
+            "bruteforce_ips": [],
+        }
+
+    ip_counter = collections.Counter(
+        str(event.get("client_ip") or "-")
+        for event in window_events
+        if event.get("client_ip")
+    )
+    username_counter = collections.Counter(
+        str(event.get("username") or "unknown")
+        for event in window_events
+    )
+    bruteforce_ips = [
+        {"ip": ip_address, "count": count}
+        for ip_address, count in ip_counter.most_common()
+        if count >= brute_force_threshold
+    ]
+    return {
+        "window_start": window_start.isoformat(),
+        "window_end": window_end.isoformat(),
+        "failed_attempts": len(window_events),
+        "top_source_ips": [
+            {"ip": ip_address, "count": count}
+            for ip_address, count in ip_counter.most_common(10)
+        ],
+        "top_usernames": [
+            {"username": username, "count": count}
+            for username, count in username_counter.most_common(10)
+        ],
+        "bruteforce_ips": bruteforce_ips[:10],
+    }
+
+
 def summarize_system_snapshots_window(
     snapshots: list[dict[str, Any]],
     window_start: dt.datetime,
@@ -1900,6 +2091,28 @@ def evaluate_alerts(
     return alerts
 
 
+def evaluate_host_security_alerts(
+    ssh_auth_summary: dict[str, Any],
+    thresholds: dict[str, Any],
+) -> list[dict[str, Any]]:
+    alerts: list[dict[str, Any]] = []
+    brute_force_ips = ssh_auth_summary.get("bruteforce_ips", [])
+    if brute_force_ips:
+        top_ip = brute_force_ips[0]
+        top_user = (ssh_auth_summary.get("top_usernames") or [{}])[0]
+        alerts.append(
+            {
+                "kind": "ssh_brute_force",
+                "severity": "critical",
+                "top_ip": top_ip.get("ip"),
+                "failure_count": int(top_ip.get("count") or 0),
+                "top_username": str(top_user.get("username") or "unknown"),
+                "window_minutes": int(thresholds.get("ssh_bruteforce_window_minutes", 5)),
+            }
+        )
+    return alerts
+
+
 def severity_value(name: str) -> int:
     return SEVERITY_RANK.get(str(name or "").lower(), 0)
 
@@ -1919,9 +2132,157 @@ def alert_cooldown_key(config: dict[str, Any], alert: dict[str, Any]) -> str:
     site = config["agent"]["site"]
     host_id = config["agent"]["host_id"]
     parts = [host_id, site, str(alert.get("kind") or "unknown")]
-    if alert.get("kind") == "suspicious_ip_burst":
+    if alert.get("kind") in {"suspicious_ip_burst", "ssh_brute_force"}:
         parts.append(str(alert.get("top_ip") or "-"))
     return ":".join(parts)
+
+
+def alert_display_site(config: dict[str, Any]) -> str:
+    site = str(config.get("agent", {}).get("site") or "-")
+    if site == HOST_METRIC_SITE:
+        return "host-security"
+    return site
+
+
+def resolve_shared_ai_settings(config: dict[str, Any]) -> dict[str, Any]:
+    ai_settings = dict(config.get("notifications", {}).get("reports", {}).get("ai_analysis") or {})
+    return {
+        "enabled": bool(ai_settings.get("enabled", True)),
+        "simulate": bool(ai_settings.get("simulate", False)),
+        "endpoint": str(ai_settings.get("endpoint") or ai_settings.get("base_url") or "").strip(),
+        "model": str(ai_settings.get("model") or "gpt-4o-mini").strip(),
+        "api_key_env": str(ai_settings.get("api_key_env") or "OPENAI_API_KEY").strip(),
+        "timeout_seconds": max(int(ai_settings.get("timeout_seconds", 20)), 3),
+    }
+
+
+def build_alert_ai_payload(
+    config: dict[str, Any],
+    alert: dict[str, Any],
+    system_snapshot: dict[str, Any],
+    access_summary: dict[str, Any],
+    error_summary: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "host_id": config.get("agent", {}).get("host_id"),
+        "site": alert_display_site(config),
+        "kind": alert.get("kind"),
+        "severity": alert.get("severity"),
+        "cpu_pct": system_snapshot.get("cpu_pct"),
+        "memory_pct": system_snapshot.get("memory_pct"),
+        "disk_free_bytes": system_snapshot.get("disk_free_bytes"),
+        "request_count": access_summary.get("total_requests"),
+        "avg_response_ms": access_summary.get("avg_response_ms"),
+        "http_404_count": access_summary.get("status_codes", {}).get("404", 0),
+        "http_5xx_count": sum(
+            count
+            for code, count in access_summary.get("status_codes", {}).items()
+            if str(code).startswith("5")
+        ),
+        "top_ip": alert.get("top_ip"),
+        "top_rpm": alert.get("top_rpm"),
+        "failure_count": alert.get("failure_count"),
+        "top_username": alert.get("top_username"),
+        "top_uri": access_summary.get("top_uris", [{}])[0].get("uri") if access_summary.get("top_uris") else None,
+        "top_error_fingerprint": error_summary.get("top_fingerprints", [{}])[0].get("fingerprint") if error_summary.get("top_fingerprints") else None,
+    }
+
+
+def alert_ai_prompt(config: dict[str, Any], payload: dict[str, Any]) -> str:
+    return (
+        "你是资深 Linux 运维专家。请根据以下告警数据，只输出两句话。\n"
+        "第 1 句话：用大白话解释发生了什么。\n"
+        "第 2 句话：给出最具体的下一步处理建议。\n"
+        "不要输出标题、序号或多余解释。\n\n"
+        f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
+    )
+
+
+def request_alert_ai_diagnosis(config: dict[str, Any], payload: dict[str, Any]) -> str | None:
+    settings = resolve_shared_ai_settings(config)
+    if not settings["enabled"] or settings["simulate"] or not settings["endpoint"]:
+        return None
+    api_key = os.getenv(settings["api_key_env"])
+    if not api_key:
+        return None
+    endpoint = settings["endpoint"].rstrip("/")
+    if endpoint.endswith("/v1"):
+        endpoint = endpoint + "/chat/completions"
+    elif not endpoint.endswith("/chat/completions"):
+        endpoint = endpoint + "/chat/completions"
+    body = {
+        "model": settings["model"],
+        "temperature": 0.2,
+        "messages": [
+            {"role": "system", "content": "You are an expert Linux SRE assistant."},
+            {"role": "user", "content": alert_ai_prompt(config, payload)},
+        ],
+    }
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=settings["timeout_seconds"]) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+        return None
+    try:
+        return str(data["choices"][0]["message"]["content"]).strip()
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+def simulate_alert_ai_diagnosis(alert: dict[str, Any]) -> str:
+    kind = str(alert.get("kind") or "")
+    if kind == "ssh_brute_force":
+        return (
+            f"有来源 IP 正在高频尝试 SSH 口令爆破，目标账号集中在 {alert.get('top_username') or '常见账户'}，"
+            f"{alert.get('window_minutes') or 5} 分钟内失败 {alert.get('failure_count') or 0} 次。\n"
+            "请优先核对白名单与管理 IP，确认后启用或保留自动封禁，并检查是否需要关闭密码登录或更换 SSH 端口。"
+        )
+    if kind == "suspicious_ip_burst":
+        return "同一来源 IP 在短时间内发起异常密集访问，表现更像扫描或 CC 试探而不是正常用户行为。\n请先确认是否命中白名单或搜索引擎爬虫，再视情况启用临时封禁并回看上游日志。"
+    if kind == "server_error_burst":
+        return "站点在短窗口内连续出现大量 5xx，说明上游应用或服务链路已经进入不稳定状态。\n请优先检查 PHP-FPM、Nginx upstream 和数据库连接池，再决定是否执行一次受控自愈。"
+    return "当前告警说明服务出现了短时异常波动，需要尽快确认影响面和触发源头。\n请先查看同一时间段的访问日志、错误日志和系统负载，再按告警建议逐项排查。"
+
+
+def normalize_alert_ai_diagnosis(text: str | None) -> dict[str, str]:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return {"analysis": "", "suggestion": ""}
+    lines = [line.strip(" -\t") for line in cleaned.splitlines() if line.strip()]
+    if len(lines) >= 2:
+        return {"analysis": lines[0], "suggestion": lines[1]}
+    sentences = re.split(r"(?<=[。！？.!?])\s*", cleaned)
+    sentences = [item.strip() for item in sentences if item.strip()]
+    if len(sentences) >= 2:
+        return {"analysis": sentences[0], "suggestion": sentences[1]}
+    return {"analysis": cleaned, "suggestion": ""}
+
+
+def build_alert_ai_diagnosis(
+    config: dict[str, Any],
+    alert: dict[str, Any],
+    system_snapshot: dict[str, Any],
+    access_summary: dict[str, Any],
+    error_summary: dict[str, Any],
+) -> dict[str, str]:
+    payload = build_alert_ai_payload(config, alert, system_snapshot, access_summary, error_summary)
+    ai_text = request_alert_ai_diagnosis(config, payload)
+    source = "llm"
+    if not ai_text:
+        ai_text = simulate_alert_ai_diagnosis(alert)
+        source = "simulated"
+    normalized = normalize_alert_ai_diagnosis(ai_text)
+    normalized["source"] = source
+    return normalized
 
 
 def alert_label(alert: dict[str, Any]) -> str:
@@ -1931,6 +2292,7 @@ def alert_label(alert: dict[str, Any]) -> str:
         "disk_low": "磁盘剩余空间不足",
         "server_error_burst": "5xx 错误突增",
         "suspicious_ip_burst": "疑似高频攻击",
+        "ssh_brute_force": "SSH 暴力破解",
         "scan_or_route_breakage": "404 扫描或路由异常",
         "latency_degradation": "接口性能劣化",
         "php_entrypoint_error": "PHP 入口脚本异常",
@@ -1945,6 +2307,7 @@ def alert_suggestion(alert: dict[str, Any]) -> str:
         "disk_low": "清理日志/备份目录，并确认是否需要扩容。",
         "server_error_burst": "优先检查 Nginx upstream、PHP-FPM 与最近发布变更。",
         "suspicious_ip_burst": "确认是否为 CC/扫描流量，必要时执行临时封禁。",
+        "ssh_brute_force": "优先核对来源 IP 是否可信，并关闭密码登录或启用自动封禁。",
         "scan_or_route_breakage": "检查最近路由变更、静态资源发布或扫描器访问。",
         "latency_degradation": "查看慢请求 URI、上游依赖与数据库响应时间。",
         "php_entrypoint_error": "检查站点根目录、伪静态与 PHP 文件权限。",
@@ -1959,8 +2322,9 @@ def render_alert_markdown(
     system_snapshot: dict[str, Any],
     access_summary: dict[str, Any],
     error_summary: dict[str, Any],
+    ai_diagnosis: dict[str, str] | None = None,
 ) -> str:
-    site = config["agent"]["site"]
+    site = alert_display_site(config)
     host_id = config["agent"]["host_id"]
     timezone = get_timezone(config)
     timestamp_local = generated_at.astimezone(timezone).isoformat()
@@ -1989,6 +2353,11 @@ def render_alert_markdown(
         detail_lines.append(
             f"- 高频 IP: `{alert.get('top_ip')}` ({alert.get('top_rpm')} req/min)"
         )
+    elif alert["kind"] == "ssh_brute_force":
+        detail_lines.append(
+            f"- 攻击来源: `{alert.get('top_ip')}` ({alert.get('failure_count', 0)} failures / {alert.get('window_minutes', 5)} min)"
+        )
+        detail_lines.append(f"- 目标账号: `{alert.get('top_username') or 'unknown'}`")
     elif alert["kind"] == "scan_or_route_breakage":
         detail_lines.append(f"- 404 次数: {alert.get('count', 0)}")
     elif alert["kind"] == "latency_degradation":
@@ -2013,6 +2382,15 @@ def render_alert_markdown(
         f"- 当前窗口错误数: {error_summary.get('total_errors', 0)}",
     ]
     lines.extend(detail_lines)
+    if ai_diagnosis and (ai_diagnosis.get("analysis") or ai_diagnosis.get("suggestion")):
+        lines.extend(
+            [
+                "",
+                "## 💡 AI 智能诊断",
+                f"- 原因分析: {ai_diagnosis.get('analysis') or 'N/A'}",
+                f"- 行动建议: {ai_diagnosis.get('suggestion') or alert_suggestion(alert)}",
+            ]
+        )
     return "\n".join(lines)
 
 
@@ -2056,7 +2434,14 @@ def deliver_alerts(
                 )
                 continue
 
-        title = f"Server-Mate 告警 | {config['agent']['site']} | {alert_label(alert)}"
+        title = f"Server-Mate 告警 | {alert_display_site(config)} | {alert_label(alert)}"
+        ai_diagnosis = build_alert_ai_diagnosis(
+            config,
+            alert,
+            system_snapshot,
+            access_summary,
+            error_summary,
+        )
         markdown = render_alert_markdown(
             config,
             alert,
@@ -2064,6 +2449,7 @@ def deliver_alerts(
             system_snapshot,
             access_summary,
             error_summary,
+            ai_diagnosis,
         )
         channel_results = send_markdown_message(config, title, markdown, channels)
         success = any(result.get("success") for result in channel_results)
@@ -2075,6 +2461,7 @@ def deliver_alerts(
                 "severity": alert["severity"],
                 "success": success,
                 "cooldown_key": cooldown_key,
+                "ai_diagnosis": ai_diagnosis,
                 "channels": channel_results,
             }
         )
@@ -2316,6 +2703,8 @@ def recent_automation_action(
 
 def render_automation_notice(config: dict[str, Any], action: dict[str, Any]) -> tuple[str, str]:
     site = str(action.get("site") or config.get("agent", {}).get("site") or "-")
+    if site == HOST_METRIC_SITE:
+        site = "host-security"
     title = f"⚠️ 自动化干预通知 | {site} | {action.get('action_type', 'automation')}"
     lines = [
         f"# {title}",
@@ -2432,14 +2821,27 @@ def handle_auto_ban(
     if not auto_ban.get("enabled", False):
         return []
 
-    suspicious_alert = next((alert for alert in alerts if alert.get("kind") == "suspicious_ip_burst"), None)
-    if not suspicious_alert:
+    matched_alert = next(
+        (
+            alert
+            for alert in alerts
+            if alert.get("kind") in {"suspicious_ip_burst", "ssh_brute_force"}
+        ),
+        None,
+    )
+    if not matched_alert:
         return []
 
     host_id = config["agent"]["host_id"]
     site = config["agent"]["site"]
-    ip_address = str(suspicious_alert.get("top_ip") or "").strip()
-    reason = f"suspicious request burst ({suspicious_alert.get('top_rpm', 0)} req/min)"
+    ip_address = str(matched_alert.get("top_ip") or "").strip()
+    if matched_alert.get("kind") == "ssh_brute_force":
+        reason = (
+            f"ssh brute-force failures ({matched_alert.get('failure_count', 0)} in "
+            f"{matched_alert.get('window_minutes', 5)} minutes)"
+        )
+    else:
+        reason = f"suspicious request burst ({matched_alert.get('top_rpm', 0)} req/min)"
     dry_run = bool(automation.get("dry_run", True))
     actions: list[dict[str, Any]] = []
 
@@ -2458,7 +2860,7 @@ def handle_auto_ban(
     elif ip_is_whitelisted(ip_address, list(auto_ban.get("whitelist_ips", []))):
         action["status"] = "skipped"
         action["stderr"] = "ip matched whitelist"
-    elif ip_matches_whitelisted_spider(
+    elif matched_alert.get("kind") == "suspicious_ip_burst" and ip_matches_whitelisted_spider(
         site_state.get("history", {}).get("access_events", []),
         ip_address,
         window_start,
@@ -2536,7 +2938,9 @@ def handle_auto_ban(
         action.get("stdout"),
         action.get("stderr"),
         {
-            "top_rpm": suspicious_alert.get("top_rpm"),
+            "alert_kind": matched_alert.get("kind"),
+            "top_rpm": matched_alert.get("top_rpm"),
+            "failure_count": matched_alert.get("failure_count"),
             "top_uri": access_summary.get("top_uris", [{}])[0].get("uri") if access_summary.get("top_uris") else None,
         },
         created_at=now,
@@ -3207,6 +3611,35 @@ def run_cycle(
             serialize_events([system_snapshot])[0]
         )
 
+    host_security_state = ensure_host_security_state(state)
+    auth_log_value = str(config.get("logs", {}).get("auth_log") or "").strip()
+    auth_log_path = Path(auth_log_value) if auth_log_value else None
+    auth_lines: list[str] = []
+    auth_cursor: dict[str, Any] = {}
+    if auth_log_path:
+        auth_lines, auth_cursor = read_incremental_lines(
+            auth_log_path,
+            host_security_state["cursors"].get("auth_log"),
+            config["agent"]["startup_mode"],
+            config["agent"]["bootstrap_tail_lines"],
+        )
+        host_security_state["cursors"]["auth_log"] = auth_cursor
+
+    ssh_auth_events: list[dict[str, Any]] = []
+    dropped_auth = 0
+    for line in auth_lines:
+        event = parse_auth_log_line(
+            line,
+            host_id,
+            timezone,
+            reference_time=now,
+        )
+        if event is None:
+            dropped_auth += 1
+            continue
+        ssh_auth_events.append(event)
+    host_security_state["history"]["ssh_auth_events"].extend(serialize_events(ssh_auth_events))
+
     site_results: dict[str, dict[str, Any]] = {}
     collected_events: dict[str, dict[str, list[dict[str, Any]]]] = {}
 
@@ -3284,6 +3717,45 @@ def run_cycle(
     save_state(state_file, state)
 
     summary_window_start = now - dt.timedelta(minutes=thresholds["summary_window_minutes"])
+    ssh_window_start = now - dt.timedelta(minutes=thresholds["ssh_bruteforce_window_minutes"])
+    ssh_auth_summary = summarize_ssh_auth_window(
+        host_security_state["history"]["ssh_auth_events"],
+        ssh_window_start,
+        now,
+        thresholds["ssh_bruteforce_failures"],
+    )
+    host_security_config = build_site_runtime_config(
+        config,
+        {
+            "domain": HOST_METRIC_SITE,
+            "site_host": host_id,
+            "enabled": True,
+            "access_log": config.get("logs", {}).get("access_log") or "",
+            "error_log": config.get("logs", {}).get("error_log") or "",
+        },
+    )
+    host_alerts = evaluate_host_security_alerts(ssh_auth_summary, thresholds)
+    host_access_summary = empty_access_summary()
+    host_error_summary = empty_error_summary()
+    host_alert_deliveries = deliver_alerts(
+        host_security_config,
+        state,
+        now,
+        host_alerts,
+        system_snapshot,
+        host_access_summary,
+        host_error_summary,
+    )
+    host_automation_actions = run_guarded_automation(
+        connection,
+        host_security_config,
+        {"history": {"access_events": []}},
+        now,
+        ssh_window_start,
+        host_access_summary,
+        host_error_summary,
+        host_alerts,
+    )
     for domain, site_result in site_results.items():
         site_config = site_result.pop("_site_config")
         site_state = ensure_site_state(state, domain)
@@ -3345,6 +3817,8 @@ def run_cycle(
         "access_lines_dropped": sum(item["parser_stats"]["access_lines_dropped"] for item in site_results.values()),
         "error_lines_read": sum(item["parser_stats"]["error_lines_read"] for item in site_results.values()),
         "error_lines_dropped": sum(item["parser_stats"]["error_lines_dropped"] for item in site_results.values()),
+        "auth_lines_read": len(auth_lines),
+        "auth_lines_dropped": dropped_auth,
     }
 
     for domain, site_result in site_results.items():
@@ -3376,6 +3850,25 @@ def run_cycle(
         },
         "system_snapshot": system_snapshot,
         "sites": site_results,
+        "host_security": {
+            "auth_log": str(auth_log_path) if auth_log_path else "",
+            "parser_stats": {
+                "auth_lines_read": len(auth_lines),
+                "auth_lines_dropped": dropped_auth,
+            },
+            "cursor": auth_cursor,
+            "ssh_auth": ssh_auth_summary,
+            "alerts": host_alerts,
+            "notifications": {
+                "alert_deliveries": host_alert_deliveries,
+            },
+            "automation": {
+                "actions": host_automation_actions,
+            },
+            "storage": {
+                "history_ssh_auth_events": len(host_security_state["history"]["ssh_auth_events"]),
+            },
+        },
         "parser_stats": total_parser_stats,
         "storage": {
             "rollups_upserted": rollups_upserted,
@@ -3386,6 +3879,8 @@ def run_cycle(
             "dry_run": bool(config.get("automation", {}).get("dry_run", True)),
         },
     }
+    if config["agent"]["emit_events"]:
+        payload["host_security"]["ssh_auth_events"] = serialize_events(ssh_auth_events)
     return payload
 
 
@@ -3404,6 +3899,12 @@ def sanitize_config_for_output(config: dict[str, Any], config_path: Path) -> dic
         channel = output.get("notifications", {}).get("webhooks", {}).get(channel_name)
         if isinstance(channel, dict) and channel.get("url"):
             channel["url"] = mask_secret_url(str(channel["url"]))
+    telegram_channel = output.get("notifications", {}).get("webhooks", {}).get("telegram")
+    if isinstance(telegram_channel, dict):
+        if telegram_channel.get("bot_token"):
+            telegram_channel["bot_token"] = mask_secret_url(str(telegram_channel["bot_token"]))
+        if telegram_channel.get("chat_id"):
+            telegram_channel["chat_id"] = mask_secret_url(str(telegram_channel["chat_id"]))
     output["meta"] = {
         "config_path": str(config_path.resolve()),
         "yaml_parser_available": yaml is not None,

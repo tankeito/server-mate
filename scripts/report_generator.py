@@ -10,13 +10,16 @@ import math
 import os
 import re
 import shutil
+import socket
 import sqlite3
+import ssl
 import sys
 import textwrap
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 try:
     import matplotlib
@@ -70,6 +73,8 @@ PDF_COLORS = {
 PDF_FONT_PATHS = [
     Path(__file__).resolve().parents[1] / "assets" / "NotoSansSC-VF.ttf",
 ]
+GEOIP_MIRROR_URL = "https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-City.mmdb"
+SSL_WARNING_DAYS = 15
 
 TRANSLATIONS = {
     "zh": {
@@ -423,6 +428,24 @@ TRANSLATIONS["en"].update(
         "visit_volume": "Visits",
         "largest": "Max",
         "smallest": "Min",
+    }
+)
+
+TRANSLATIONS["zh"].update(
+    {
+        "ssl_remaining": "SSL 证书剩余",
+        "http_status_distribution": "HTTP 状态码分布",
+        "top_pages_short": "热门页面 Top 3",
+        "top_ips_short": "访问 IP Top 3",
+    }
+)
+
+TRANSLATIONS["en"].update(
+    {
+        "ssl_remaining": "SSL Remaining",
+        "http_status_distribution": "HTTP Status Mix",
+        "top_pages_short": "Top Pages",
+        "top_ips_short": "Top IPs",
     }
 )
 
@@ -831,13 +854,51 @@ def localized_unknown_info(config: dict[str, Any]) -> str:
     return "待配置 GeoIP" if report_language(config) == "zh" else "GeoIP Not Configured"
 
 
-def resolve_geoip_city_db(config: dict[str, Any]) -> Path | None:
+def ensure_geoip_city_db(config: dict[str, Any]) -> Path | None:
     reports = config.get("notifications", {}).get("reports", {})
     raw_path = str(reports.get("geoip_city_db") or "").strip()
     if not raw_path:
         return None
+
     path = Path(raw_path).expanduser()
-    return path if path.exists() else None
+    if path.exists():
+        return path
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    try:
+        print(f"[geoip] downloading {path.name} from public mirror...", file=sys.stderr, flush=True)
+        with urllib.request.urlopen(GEOIP_MIRROR_URL, timeout=30) as response, temp_path.open("wb") as handle:
+            total = int(response.headers.get("Content-Length") or 0)
+            downloaded = 0
+            while True:
+                chunk = response.read(1024 * 128)
+                if not chunk:
+                    break
+                handle.write(chunk)
+                downloaded += len(chunk)
+                if total > 0:
+                    percent = downloaded / total * 100.0
+                    print(
+                        f"[geoip] {downloaded}/{total} bytes ({percent:.1f}%)",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                else:
+                    print(f"[geoip] {downloaded} bytes downloaded", file=sys.stderr, flush=True)
+        temp_path.replace(path)
+        print(f"[geoip] saved to {path}", file=sys.stderr, flush=True)
+        return path
+    except Exception:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
+
+
+def resolve_geoip_city_db(config: dict[str, Any]) -> Path | None:
+    return ensure_geoip_city_db(config)
 
 
 def open_geoip_reader(config: dict[str, Any]) -> Any | None:
@@ -922,6 +983,95 @@ def enrich_ip_rows_with_geo(
             pass
     province_rows.sort(key=lambda item: (-int(item["request_count"]), str(item["item"])))
     return enriched_rows, province_rows
+
+
+def resolve_ssl_target(config: dict[str, Any]) -> dict[str, Any]:
+    agent = config.get("agent", {})
+    raw_site = str(agent.get("site") or agent.get("site_host") or "").strip()
+    if not raw_site:
+        return {"source": "", "scheme": "https", "hostname": "", "port": 443}
+
+    parsed = urlparse(raw_site if "://" in raw_site else f"https://{raw_site}")
+    hostname = parsed.hostname or raw_site.split("/")[0]
+    scheme = (parsed.scheme or "https").lower()
+    if scheme == "http":
+        port = parsed.port or 80
+    else:
+        scheme = "https"
+        port = parsed.port or 443
+    return {
+        "source": raw_site,
+        "scheme": scheme,
+        "hostname": hostname,
+        "port": port,
+    }
+
+
+def check_ssl_expiry(config: dict[str, Any], timeout_seconds: int = 5) -> dict[str, Any]:
+    target = resolve_ssl_target(config)
+    hostname = str(target.get("hostname") or "").strip()
+    scheme = str(target.get("scheme") or "https").lower()
+    port = int(target.get("port") or (443 if scheme == "https" else 80))
+    if not hostname or scheme != "https":
+        return {
+            "hostname": hostname,
+            "port": port,
+            "scheme": scheme,
+            "days_remaining": None,
+            "status": "na",
+            "error": None,
+        }
+
+    context = ssl.create_default_context()
+    try:
+        with socket.create_connection((hostname, port), timeout=timeout_seconds) as tcp_socket:
+            with context.wrap_socket(tcp_socket, server_hostname=hostname) as tls_socket:
+                certificate = tls_socket.getpeercert()
+        expires_raw = str(certificate.get("notAfter") or "").strip()
+        if not expires_raw:
+            raise ValueError("certificate missing notAfter")
+        expires_at = dt.datetime.strptime(expires_raw, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=dt.timezone.utc)
+        seconds_remaining = (expires_at - dt.datetime.now(dt.timezone.utc)).total_seconds()
+        days_remaining = math.floor(seconds_remaining / 86400)
+        status = "expired" if days_remaining < 0 else "warning" if days_remaining < SSL_WARNING_DAYS else "ok"
+        return {
+            "hostname": hostname,
+            "port": port,
+            "scheme": scheme,
+            "days_remaining": days_remaining,
+            "status": status,
+            "expires_at": expires_at.isoformat(),
+            "error": None,
+        }
+    except Exception as exc:
+        return {
+            "hostname": hostname,
+            "port": port,
+            "scheme": scheme,
+            "days_remaining": None,
+            "status": "na",
+            "error": str(exc),
+        }
+
+
+def format_ssl_summary_text(config: dict[str, Any], ssl_info: dict[str, Any]) -> str:
+    language = report_language(config)
+    days_remaining = ssl_info.get("days_remaining")
+    status = str(ssl_info.get("status") or "na")
+    if days_remaining is None or status == "na":
+        return "N/A"
+    if status == "expired":
+        return f"已过期 {abs(int(days_remaining))} 天" if language == "zh" else f"Expired {abs(int(days_remaining))} days"
+    return f"{int(days_remaining)} 天" if language == "zh" else f"{int(days_remaining)} days"
+
+
+def format_ssl_markdown_line(config: dict[str, Any], ssl_info: dict[str, Any]) -> str:
+    label = t(config, "ssl_remaining")
+    status = str(ssl_info.get("status") or "na")
+    summary = format_ssl_summary_text(config, ssl_info)
+    if status in {"warning", "expired"}:
+        return f"⚠️ {label}: {summary}"
+    return f"🔒 {label}: {summary}"
 
 
 def aggregate_status_families(status_codes: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1627,6 +1777,7 @@ def prepare_report(
     report["previous_summary"] = previous_summary
     report["compare_label"] = compare_label(config, report_kind)
     report["kpi_comparisons"] = build_kpi_comparisons(report, previous_summary)
+    report["ssl"] = check_ssl_expiry(config)
     return attach_ai_analysis(report, config)
 
 
@@ -1682,6 +1833,8 @@ def ai_analysis_payload(report: dict[str, Any]) -> dict[str, Any]:
         "suspicious_ip_count": security["suspicious_ip_count"],
         "top_error_fingerprint": top_error.get("item"),
         "top_error_count": top_error.get("count"),
+        "ssl_days_remaining": (report.get("ssl") or {}).get("days_remaining"),
+        "ssl_status": (report.get("ssl") or {}).get("status"),
     }
 
 
@@ -1785,6 +1938,7 @@ def render_daily_markdown(report: dict[str, Any], config: dict[str, Any]) -> str
     meta = report["meta"]
     traffic = report["traffic"]
     system = report["system"]
+    ssl_info = report.get("ssl") or {}
     total_requests = max(int(traffic["request_count"] or 0), 1)
     lines = [
         f"# {t(config, 'daily_title')} | {meta['site']}",
@@ -1802,6 +1956,7 @@ def render_daily_markdown(report: dict[str, Any], config: dict[str, Any]) -> str
         f"- {t(config, 'peak_qps')}: {format_number(traffic['qps_peak'], 4)}",
         f"- {t(config, 'avg_response')}: {format_number(traffic['avg_response_ms'])} ms",
         f"- {t(config, 'slow_requests')}: {format_number(traffic['slow_request_count'])}",
+        f"- {t(config, 'ssl_remaining')}: {format_ssl_summary_text(config, ssl_info)}",
         f"- {t(config, 'bandwidth_out')}: {format_bytes(traffic['bandwidth_out_bytes'])}",
         f"- {t(config, 'bandwidth_in')}: {format_bytes(traffic['bandwidth_in_bytes'])}",
         "",
@@ -4700,9 +4855,10 @@ def draw_baota_header_black(
     ax.text(0.0, 0.23, demo["window"], ha="left", va="top", color="#000000", fontproperties=pdf_font(7.8), transform=ax.transAxes)
     ax.text(1.0, 0.82, f"{labels['requests']}: {demo['total_requests']}", ha="right", va="top", color="#000000", fontproperties=pdf_font(9.6, "bold"), transform=ax.transAxes)
     ax.text(1.0, 0.48, f"{labels['total_traffic']}: {demo['total_traffic']}", ha="right", va="top", color="#000000", fontproperties=pdf_font(9.6, "bold"), transform=ax.transAxes)
+    ax.text(1.0, 0.25, f"{labels['ssl_remaining']}: {demo.get('ssl_summary', 'N/A')}", ha="right", va="top", color="#000000", fontproperties=pdf_font(9.2, "bold"), transform=ax.transAxes)
     ax.text(
         1.0,
-        0.18,
+        0.06,
         f"{labels['page_indicator'].format(current=page_number, total=total_pages)}  {labels['generated_at']}: {generated_at}",
         ha="right",
         va="top",
@@ -6418,6 +6574,7 @@ def build_dashboard_view(report: dict[str, Any], config: dict[str, Any]) -> dict
         "window": f"{report['meta']['window_start']} - {report['meta']['window_end']}",
         "total_requests": format_number(traffic.get("request_count")),
         "total_traffic": format_bytes(total_traffic_bytes(report)),
+        "ssl_summary": format_ssl_summary_text(config, report.get("ssl") or {}),
         "x_labels": x_labels,
         "trend": trend,
         "performance": performance,
@@ -6682,6 +6839,45 @@ def normalize_filename_part(value: str | None, fallback: str) -> str:
     return text or fallback
 
 
+def build_report_timestamp(config: dict[str, Any]) -> str:
+    return dt.datetime.now(get_timezone(config)).strftime("%Y%m%d%H%M%S")
+
+
+def compact_summary_text(value: str | None, limit: int = 55, strip_query: bool = False) -> str:
+    text = str(value or "").strip()
+    if strip_query:
+        text = text.split("?", 1)[0]
+    text = re.sub(r"\s+", " ", text)
+    if len(text) > limit:
+        text = text[: max(limit - 3, 1)] + "..."
+    return text or "-"
+
+
+def summarize_status_mix(report: dict[str, Any]) -> str:
+    families = {str(item.get("item") or ""): int(item.get("count") or 0) for item in report.get("status_families") or []}
+    ordered = ["2xx", "3xx", "4xx", "5xx"]
+    return " | ".join(f"{family} {format_number(families.get(family, 0))}" for family in ordered)
+
+
+def summarize_ranked_items(
+    rows: list[dict[str, Any]] | None,
+    limit: int = 3,
+    strip_query: bool = False,
+) -> str:
+    items: list[str] = []
+    for row in (rows or [])[:limit]:
+        label = compact_summary_text(
+            str(row.get("item") or row.get("uri") or row.get("source_name") or ""),
+            limit=55,
+            strip_query=strip_query,
+        )
+        count = row.get("request_count")
+        if count is None:
+            count = row.get("count")
+        items.append(f"{label} ({format_number(count)})")
+    return " | ".join(items) if items else "-"
+
+
 def build_report_filename(
     config: dict[str, Any],
     report_kind: str,
@@ -6690,12 +6886,13 @@ def build_report_filename(
     site_name: str | None = None,
 ) -> str:
     language = report_language(config)
-    locale = "zh-cn" if language == "zh" else "en"
     agent = config.get("agent", {})
     resolved_site = site_name or agent.get("site") or agent.get("site_host") or agent.get("host_id") or "server"
     site_slug = normalize_filename_part(str(resolved_site), "server")
     report_slug = normalize_filename_part(report_kind, "report")
-    return f"server-mate-{site_slug}-{report_slug}-{report_date.isoformat()}-{locale}.{suffix}"
+    timestamp = build_report_timestamp(config)
+    locale = "zh" if language == "zh" else "en"
+    return f"server-mate-{site_slug}-{report_slug}-{timestamp}-{locale}.{suffix}"
 
 
 def resolve_output_path(
@@ -6778,6 +6975,9 @@ def send_report_notice(
     selected_channels = channels or scope.get("channels", [])
     title_key = f"{report_kind}_title"
     title = f"{t(config, title_key)} | {report['meta']['site']} | {report['meta']['report_date']}"
+    top_page_rows = report.get("top_uri_details") or report.get("top_uris") or []
+    top_ip_rows = report.get("top_client_ips") or report.get("abnormal_ips") or []
+    ssl_info = report.get("ssl") or {}
     lines = [
         f"# {title}",
         "",
@@ -6785,12 +6985,13 @@ def send_report_notice(
         f"- {t(config, 'pv')}/{t(config, 'uv')}: {format_number(report['traffic']['pv'])} / {format_number(report['traffic']['uv'])}",
         f"- {t(config, 'requests')}/{t(config, 'slow_requests')}: {format_number(report['traffic']['request_count'])} / {format_number(report['traffic']['slow_request_count'])}",
         f"- {t(config, 'peak_qps')}: {format_number(report['traffic']['qps_peak'], 4)}",
-        f"- {t(config, 'report_path')}: `{local_path}`",
+        f"- {format_ssl_markdown_line(config, ssl_info)}",
+        f"- {t(config, 'http_status_distribution')}: {summarize_status_mix(report)}",
+        f"- {t(config, 'top_pages_short')}: {summarize_ranked_items(top_page_rows, 3, strip_query=True)}",
+        f"- {t(config, 'top_ips_short')}: {summarize_ranked_items(top_ip_rows, 3)}",
     ]
-    if exported_path != local_path:
-        lines.append(f"- export path: `{exported_path}`")
     if public_url:
-        lines.append(f"- {t(config, 'download_url')}: [open report]({public_url})")
+        lines.append(f"- {t(config, 'download_url')}: [{local_path.name}]({public_url})")
     else:
         lines.append(f"- {t(config, 'download_url')}: {t(config, 'local_only')}")
     lines.extend(["", f"> {t(config, 'report_note')}"])
@@ -6876,7 +7077,7 @@ def main() -> int:
         rendered_markdowns: list[str] = []
         for site in selected_sites:
             site_config = build_site_runtime_config(config, site)
-            report = daily_summary(connection, site_config, report_date)
+            report = prepare_report(connection, site_config, "daily", report_date)
             markdown = render_daily_markdown(report, site_config)
             output_path = resolve_site_output_path(
                 getattr(args, "output", None),

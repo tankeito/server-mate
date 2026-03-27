@@ -6,7 +6,7 @@
 
 > 专为运行 Nginx 或 Apache 的 Linux 主机设计的双平面监控系统。
 
-[![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-1.3.0-blue.svg)]()
 [![OpenClaw](https://img.shields.io/badge/OpenClaw-Skill-success.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Platform-CentOS%2FUbuntu%2FDebian-lightgrey.svg)](https://linux.org)
@@ -30,8 +30,10 @@
 - 📈 **流量分析**：PV、UV、IP 统计、QPS、带宽、状态码分布
 - 🕷️ **蜘蛛检测**：爬虫家族识别和流量分离
 - ⚠️ **智能警报**：基于阈值的 Webhook 推送（钉钉、企业微信、飞书、Telegram）
+- 🛡️ **SSH 防暴破护盾**：系统认证日志爆破检测并联动 Guarded Automation 自动封禁
 - 🤖 **AI 诊断**：自然语言错误解释和修复指导
 - 📄 **自动报告**：日报/周报/月报 PDF，附带 AI 评论
+- 🔒 **SSL 到期巡检**：在 PDF 概览和 Webhook 摘要中展示证书剩余天数
 - 🔒 **安全自动化**：可选的自动封禁和自动修复，带冷却时间和审计日志
 
 ### 🎯 使用场景
@@ -44,7 +46,17 @@
 
 ---
 
-## 🆕 v1.2.0 新功能
+## 🆕 v1.3.0 新功能
+
+### SSH 防暴破护盾
+
+- **认证日志解析**：增量读取 `logs.auth_log`，或自动探测 `/var/log/auth.log` / `/var/log/secure` 中的 `Failed password` 爆破指纹
+- **联动自动封禁**：持续 SSH 登录失败会触发 `ssh_brute_force` 告警，并可无缝接入现有白名单感知的 auto-ban 流程
+
+### SSL 证书到期巡检
+
+- **轻量巡检**：报表生成阶段使用 Python 原生 `ssl` 与 `socket` 检查每个站点的证书有效期
+- **统一透出**：剩余天数会出现在 PDF 概览区和 Webhook Markdown 摘要中，少于 15 天自动高亮提示
 
 ### PDF 长文本防溢出
 
@@ -67,7 +79,7 @@
 
 ### systemd 模板
 
-- **`server-mate.service`**：新增可直接修改的守护模板，内置 `Restart=always`
+- **`--generate-service`**：Agent 可直接打印当前工作目录可用的 systemd 守护模板，内置 `Restart=always`
 
 ### 多站点监控
 
@@ -95,7 +107,7 @@
 
 ### 配置
 
-- **`config.example.yaml`**：v1.2.0 的推荐起点，预配置多站点、Telegram、AI 告警诊断和 Guarded Automation
+- **`config.example.yaml`**：v1.3.0 的推荐起点，预配置多站点、Telegram、SSH 认证日志监控、SSL 巡检、AI 告警诊断和 Guarded Automation
 
 ---
 
@@ -119,7 +131,7 @@ python3 -m pip install geoip2
 
 生成或编辑 `config.yaml`：
 
-从 `1.2.0` 开始，建议优先复制 [`config.example.yaml`](config.example.yaml) 为 `config.yaml`。在 OpenClaw 中，请将 `config.yaml`、`metrics.db`、`logs/` 和 `reports/` 全部保留在当前工作目录 `./` 下。
+从 `1.3.0` 开始，建议优先复制 [`config.example.yaml`](config.example.yaml) 为 `config.yaml`。在 OpenClaw 中，请将 `config.yaml`、`metrics.db`、`logs/` 和 `reports/` 全部保留在当前工作目录 `./` 下。
 
 ```yaml
 agent:
@@ -135,6 +147,9 @@ logs:
 storage:
   database_file: ./metrics.db
   rollup_minutes: [10, 60]
+
+logs:
+  auth_log: ""
 
 notifications:
   webhooks:
@@ -394,7 +409,7 @@ server-mate/
 ├── README.md                         # 英文文档
 ├── README_ZH.md                      # 中文文档
 ├── user-guide.md                     # 详细部署指南
-├── server-mate.service               # systemd 守护模板
+├── config.example.yaml               # 完整配置模板
 ├── agents/
 │   └── openai.yaml                  # OpenAI 代理接口配置
 ├── references/

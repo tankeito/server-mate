@@ -1,7 +1,7 @@
 ---
 name: server-mate
-version: 1.1.2
-description: Build or extend a lightweight server monitoring and AI operations workflow for Linux hosts running Nginx or Apache. Use when Codex needs to collect psutil metrics, parse access or error logs, design JSON payloads or APIs, add webhook alerts, generate daily or weekly ops reports, answer natural-language monitoring questions, or implement guarded auto-ban and auto-heal behaviors.
+version: 1.3.0
+description: Build or extend a lightweight server monitoring and AI operations workflow for Linux hosts running Nginx or Apache. Use when Codex needs to collect psutil metrics, parse access, error, or auth logs, design JSON payloads or APIs, add webhook alerts, generate PDF ops reports with SSL expiry summaries, answer natural-language monitoring questions, or implement guarded auto-ban and auto-heal behaviors.
 homepage: https://github.com/tankeito/server-mate
 metadata:
   clawdbot:
@@ -15,7 +15,7 @@ metadata:
 
 # Server Mate
 
-Version: `1.1.2`
+Version: `1.3.0`
 
 Use this skill to design or implement a two-plane monitoring system:
 - a Python agent on the server that tails logs and samples host metrics
@@ -109,12 +109,15 @@ Use external scheduling for production unless the user explicitly wants an alway
   - Monthly PDF push on day `1` at `01:20`.
 - In multi-site mode, a single scheduled `report_generator.py` run should iterate over every configured site unless the user explicitly passes `--site`.
 
-## Release notes for 1.1.2
+## Release notes for 1.3.0
 
 - Multi-site matrix config using `sites[]` plus global `system_metrics`
 - Host-global metrics stored separately from site-local business rollups
 - Logrotate-tolerant incremental readers with inode or truncate recovery
 - Guarded Automation with `dry_run`, whitelist checks, TTL-based unban, cooldown-based auto-heal, and SQLite audit trail
+- SSH brute-force detection from `logs.auth_log` with `ssh_brute_force` alerting and optional linked auto-ban
+- SSL certificate expiry inspection in report generation and webhook summaries
+- Telegram delivery support for alerts and report notices
 
 Copyable cron examples:
 

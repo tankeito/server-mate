@@ -1,6 +1,6 @@
 # Server-Mate User Guide
 
-Version: `1.1.1`
+Version: `1.3.0`
 
 ## 1. What This Guide Covers
 
@@ -10,6 +10,7 @@ It covers:
 
 - Python and system dependencies
 - multi-site `config.yaml` setup
+- SSH brute-force monitoring and SSL expiry checks
 - Daily / weekly / monthly report generation
 - Guarded Automation safety rules and audit workflow
 - Cron and systemd scheduling
@@ -113,6 +114,9 @@ system_metrics:
   disk_root: /
   collect_network_io: true
 
+logs:
+  auth_log: ""
+
 sites:
   - domain: site-a.example.com
     site_host: site-a.example.com
@@ -127,8 +131,18 @@ storage:
   database_file: ./metrics.db
   rollup_minutes: [10, 60]
 
+thresholds:
+  ssh_bruteforce_window_minutes: 5
+  ssh_bruteforce_failures: 10
+
 notifications:
   webhooks:
+    telegram:
+      enabled: false
+      bot_token: ""
+      chat_id: ""
+      timeout_seconds: 10
+      disable_web_page_preview: true
     dingtalk:
       enabled: true
       url: https://oapi.dingtalk.com/robot/send?access_token=YOUR_TOKEN
@@ -148,7 +162,7 @@ notifications:
       enabled: true
       push_time: "08:30"
       output_dir: ./reports
-      channels: [dingtalk]
+      channels: [dingtalk, telegram]
     weekly:
       enabled: true
       push_weekday: 1
@@ -246,8 +260,18 @@ Examples:
   - Memory alert threshold.
 - `disk_free_ratio`
   - Disk free space threshold, for example `0.10`.
+- `ssh_bruteforce_window_minutes`
+  - Rolling window used for SSH brute-force detection.
+- `ssh_bruteforce_failures`
+  - Failed SSH login threshold per source IP inside the rolling window.
 
-### 4.6 `notifications.webhooks`
+### 4.6 `logs`
+
+- `auth_log`
+  - Optional SSH/authentication log path.
+  - Leave it empty to auto-detect `/var/log/auth.log` on Ubuntu/Debian or `/var/log/secure` on CentOS/RHEL-family systems.
+
+### 4.7 `notifications.webhooks`
 
 Each channel supports:
 
@@ -263,7 +287,16 @@ Additional DingTalk option:
 - `at_all`
   - Whether the robot should mention everyone.
 
-### 4.7 `notifications.reports`
+Telegram-specific options:
+
+- `bot_token`
+  - Telegram bot token. If empty, Server-Mate falls back to `TELEGRAM_BOT_TOKEN`.
+- `chat_id`
+  - Telegram target chat id. If empty, Server-Mate falls back to `TELEGRAM_CHAT_ID`.
+- `disable_web_page_preview`
+  - Whether Telegram should hide URL previews in push messages.
+
+### 4.8 `notifications.reports`
 
 Global report options:
 
@@ -275,6 +308,8 @@ Global report options:
   - Optional URL prefix used to build direct download links.
 - `geoip_city_db`
   - Optional GeoIP City database path. When configured with `geoip2`, province-distribution charts use real IP geolocation. If omitted, Server-Mate falls back to `Unknown Region` / `未知地区`.
+  - If the configured file is missing, the report generator can auto-download the `.mmdb` file from a public mirror before rendering.
+  - Report generation also checks the configured site certificate and surfaces SSL remaining days in PDF headers and webhook summaries.
 
 Per-schedule options:
 
@@ -304,7 +339,7 @@ Monthly-specific:
 - `push_day`
   - `1-28`.
 
-### 4.8 `notifications.reports.ai_analysis`
+### 4.9 `notifications.reports.ai_analysis`
 
 - `enabled`
   - Enables AI health commentary for daily / weekly / monthly PDF reports.
@@ -319,15 +354,9 @@ Monthly-specific:
 - `timeout_seconds`
   - HTTP timeout for the AI request.
 
-Before generating reports with real AI analysis, export the API key:
+In OpenClaw, `OPENAI_API_KEY` is injected by the runtime automatically. Do not add a manual `export OPENAI_API_KEY=...` step in normal OpenClaw deployments.
 
-```bash
-export OPENAI_API_KEY="YOUR_REAL_API_KEY"
-```
-
-If you are using `systemd`, place the same variable in an Environment file or directly in the service unit.
-
-### 4.9 `automation`
+### 4.10 `automation`
 
 Global switch:
 

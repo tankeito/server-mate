@@ -6,7 +6,7 @@ English | [中文](README_ZH.md)
 
 > A two-plane monitoring system for Linux hosts running Nginx or Apache.
 
-[![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-1.3.0-blue.svg)]()
 [![OpenClaw](https://img.shields.io/badge/OpenClaw-Skill-success.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Platform-CentOS%2FUbuntu%2FDebian-lightgrey.svg)](https://linux.org)
@@ -30,8 +30,10 @@ It splits responsibilities into two planes:
 - 📈 **Traffic Analysis**: PV, UV, IP counts, QPS, bandwidth, status breakdown
 - 🕷️ **Spider Detection**: Crawler family identification and traffic separation
 - ⚠️ **Smart Alerts**: Threshold-based webhooks (DingTalk, WeCom, Feishu, Telegram)
+- 🛡️ **SSH Security Shield**: auth log brute-force detection linked with Guarded Automation auto-ban
 - 🤖 **AI Diagnosis**: Natural-language error explanations and remediation guidance
 - 📄 **Auto Reports**: Daily/Weekly/Monthly PDF reports with AI commentary
+- 🔒 **SSL Expiry Checks**: certificate remaining-days inspection in PDF headers and webhook summaries
 - 🔒 **Guarded Automation**: Optional auto-ban and auto-heal with cooldowns and audit logs
 
 ### 🎯 Use Cases
@@ -44,7 +46,17 @@ It splits responsibilities into two planes:
 
 ---
 
-## 🆕 What's New in v1.2.0
+## 🆕 What's New in v1.3.0
+
+### SSH Security Shield
+
+- **Auth Log Parsing**: incrementally parses `logs.auth_log` (or auto-detects `/var/log/auth.log` / `/var/log/secure`) for `Failed password` fingerprints
+- **Linked Auto-Ban**: repeated SSH failures now raise `ssh_brute_force` alerts and can flow into the existing whitelist-aware auto-ban pipeline
+
+### SSL Expiry Checker
+
+- **Certificate Inspection**: report generation now checks each configured site certificate with Python `ssl` and `socket`
+- **Visible Everywhere**: remaining days appear in PDF overview blocks and webhook markdown summaries, with warning markers below 15 days
 
 ### PDF Overflow Guard
 
@@ -67,7 +79,7 @@ It splits responsibilities into two planes:
 
 ### systemd Template
 
-- **`server-mate.service`**: added a ready-to-edit service template for daemon hosting with `Restart=always`
+- **`--generate-service`**: the agent can print a host-local systemd unit template for daemon hosting with `Restart=always`
 
 ### Multi-Site Monitoring
 
@@ -95,7 +107,7 @@ It splits responsibilities into two planes:
 
 ### Configuration
 
-- **`config.example.yaml`**: Recommended starting point for v1.2.0 with multi-site, Telegram, AI alert diagnosis, and Guarded Automation pre-configured
+- **`config.example.yaml`**: Recommended starting point for v1.3.0 with multi-site, Telegram, SSH auth monitoring, SSL checks, AI alert diagnosis, and Guarded Automation pre-configured
 
 ---
 
@@ -119,7 +131,7 @@ python3 -m pip install geoip2
 
 Generate or edit `config.yaml`:
 
-For `1.2.0`, it is recommended to copy [`config.example.yaml`](config.example.yaml) to `config.yaml` first. In OpenClaw, keep `config.yaml`, `metrics.db`, `logs/`, and `reports/` inside the current workspace (`./`).
+For `1.3.0`, it is recommended to copy [`config.example.yaml`](config.example.yaml) to `config.yaml` first. In OpenClaw, keep `config.yaml`, `metrics.db`, `logs/`, and `reports/` inside the current workspace (`./`).
 
 ```yaml
 agent:
@@ -135,6 +147,9 @@ logs:
 storage:
   database_file: ./metrics.db
   rollup_minutes: [10, 60]
+
+logs:
+  auth_log: ""
 
 notifications:
   webhooks:
@@ -394,7 +409,7 @@ server-mate/
 ├── README.md                         # English documentation
 ├── README_ZH.md                      # Chinese documentation
 ├── user-guide.md                     # Detailed deployment guide
-├── server-mate.service               # systemd service template
+├── config.example.yaml               # Full example config template
 ├── agents/
 │   └── openai.yaml                  # OpenAI agent interface config
 ├── references/

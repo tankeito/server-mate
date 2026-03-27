@@ -1,6 +1,6 @@
 {
   "name": "server-mate",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Lightweight server monitoring and AI operations workflow for Linux hosts running Nginx or Apache",
   "author": "tankeito",
   "license": "MIT",
@@ -15,6 +15,9 @@
     "multi-site",
     "telegram",
     "systemd",
+    "ssh-security",
+    "ssl-monitoring",
+    "certificate-expiry",
     "linux",
     "nginx",
     "apache",
@@ -51,10 +54,12 @@
     "Traffic analysis (PV, UV, IP, QPS, bandwidth)",
     "Spider detection and traffic separation",
     "Threshold-based webhook alerts",
+    "SSH brute-force monitoring with linked guarded auto-ban",
     "Telegram bot alert delivery",
     "AI alert diagnosis with plain-language remediation hints",
     "AI-powered error diagnosis",
     "Daily/Weekly/Monthly PDF reports",
+    "SSL certificate expiry inspection in reports and webhook summaries",
     "PDF-safe long URL and referer truncation",
     "Guarded auto-ban and auto-heal automation"
   ],
@@ -70,20 +75,15 @@
     "required": [],
     "optional": [
       "TELEGRAM_BOT_TOKEN",
-      "TELEGRAM_CHAT_ID"
-    ],
-    "managed_by_runtime": [
+      "TELEGRAM_CHAT_ID",
       "OPENAI_API_KEY"
-    ],
-    "primary": "OPENAI_API_KEY"
+    ]
   },
   "credentials": {
-    "managed_env": [
-      "OPENAI_API_KEY"
-    ],
     "optional_env": [
       "TELEGRAM_BOT_TOKEN",
-      "TELEGRAM_CHAT_ID"
+      "TELEGRAM_CHAT_ID",
+      "OPENAI_API_KEY"
     ],
     "config_secrets": [
       "notifications.webhooks.*.url",
@@ -92,7 +92,7 @@
       "notifications.ai_analysis.api_key_env"
     ],
     "notes": [
-      "OPENAI_API_KEY is injected by the OpenClaw runtime when AI analysis is enabled.",
+      "OPENAI_API_KEY is strictly an optional environment variable, only needed if the user manually enables AI analysis.",
       "Telegram bot_token and chat_id may be stored in config.yaml or supplied via environment variables.",
       "Webhook URLs and tokens are operator-supplied secrets stored in config.yaml."
     ]
