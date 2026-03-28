@@ -1,6 +1,6 @@
 ---
 name: server-mate
-version: 1.3.1
+version: 1.3.2
 description: Build or extend a lightweight server monitoring and AI operations workflow for Linux hosts running Nginx or Apache. Use when Codex needs to collect psutil metrics, parse access, error, or auth logs, design JSON payloads or APIs, add webhook alerts, generate PDF ops reports with SSL expiry summaries, answer natural-language monitoring questions, or implement guarded auto-ban and auto-heal behaviors.
 homepage: https://github.com/tankeito/server-mate
 metadata:
@@ -15,7 +15,7 @@ metadata:
 
 # Server Mate
 
-Version: `1.3.1`
+Version: `1.3.2`
 
 Use this skill to design or implement a two-plane monitoring system:
 - a Python agent on the server that tails logs and samples host metrics
@@ -27,6 +27,7 @@ Use this skill to design or implement a two-plane monitoring system:
 - Keep collection read-only until the user explicitly asks for automation. Add alerting before any auto-ban or auto-heal behavior.
 - In OpenClaw deployments, `OPENAI_API_KEY` is injected by the runtime when AI analysis is enabled. Do not ask the user to export it manually. Treat webhook URLs or tokens in `config.yaml` as secrets and do not commit them.
 - Treat `./data/GeoIP.conf` the same way. It may contain MaxMind `AccountID` and `LicenseKey`, so keep it local-only and out of Git.
+- Prefer MaxMind's official GeoLite2 workflow through `./data/GeoIP.conf` and `geoipupdate`. Treat the built-in public mirror fallback only as an operator-reviewed bootstrap path when no local `.mmdb` file is present.
 - Treat auto-ban and auto-heal as privileged features. They may execute operator-supplied firewall or service restart commands and should stay disabled or `dry_run: true` until reviewed.
 - Use the references progressively instead of loading everything at once:
   - Read [references/architecture.md](references/architecture.md) for overall design, component boundaries, and rollout order.
@@ -80,6 +81,7 @@ Use this skill to design or implement a two-plane monitoring system:
 
 - Treat auto-ban and auto-heal as opt-in features.
 - Default Guarded Automation to `dry_run: true` and keep it there until the user has observed automation notifications and audit history for several days.
+- Never flip `dry_run` to `false`, or enable `auto_ban.enabled` / `auto_heal.enabled`, unless the operator explicitly approves the command templates, allowlists, cooldowns, and audit destinations.
 - Require cooldowns, max actions per window, and allowlists before running firewall or restart commands.
 - Require whitelist checks before any ban command. Never ban loopback, RFC1918 private ranges, or trusted crawler families by default.
 - Require TTL-based unban or an equivalent release plan for every ban. Do not create permanent firewall blocks from the first implementation.
@@ -110,7 +112,7 @@ Use external scheduling for production unless the user explicitly wants an alway
   - Monthly PDF push on day `1` at `01:20`.
 - In multi-site mode, a single scheduled `report_generator.py` run should iterate over every configured site unless the user explicitly passes `--site`.
 
-## Release notes for 1.3.1
+## Release notes for 1.3.2
 
 - Multi-site matrix config using `sites[]` plus global `system_metrics`
 - Host-global metrics stored separately from site-local business rollups
@@ -119,7 +121,7 @@ Use external scheduling for production unless the user explicitly wants an alway
 - SSH brute-force detection from `logs.auth_log` with `ssh_brute_force` alerting and optional linked auto-ban
 - SSL certificate expiry inspection in report generation and webhook summaries
 - Telegram delivery support for alerts and report notices
-- GeoIP official refresh support via local `./data/GeoIP.conf` and `geoipupdate`, with public mirror fallback
+- GeoIP official refresh support via local `./data/GeoIP.conf` and `geoipupdate`, with an operator-reviewed public mirror bootstrap fallback
 - `config.example.yaml` and docs updated for MaxMind GeoLite2 setup in the current workspace
 
 Copyable cron examples:

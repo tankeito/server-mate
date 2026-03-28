@@ -1,6 +1,6 @@
 {
   "name": "server-mate",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "description": "Lightweight server monitoring and AI operations workflow for Linux hosts running Nginx or Apache",
   "author": "tankeito",
   "license": "MIT",
@@ -46,7 +46,8 @@
     ],
     "optional": [
       "geoip2",
-      "requests"
+      "maxminddb",
+      "aiohttp"
     ]
   },
   "features": [
@@ -61,7 +62,7 @@
     "AI alert diagnosis with plain-language remediation hints",
     "AI-powered error diagnosis",
     "Daily/Weekly/Monthly PDF reports",
-    "GeoIP auto-provisioning via MaxMind GeoIP.conf or public mirror fallback",
+    "GeoIP auto-provisioning via local MaxMind GeoIP.conf, with an operator-reviewed public mirror bootstrap fallback",
     "SSL certificate expiry inspection in reports and webhook summaries",
     "PDF-safe long URL and referer truncation",
     "Guarded auto-ban and auto-heal automation"
@@ -105,15 +106,22 @@
   },
   "security": {
     "default_mode": "read-only collection with Guarded Automation dry_run enabled",
+    "automation_opt_in": true,
     "privileged_operations": [
       "Firewall ban and unban commands when auto_ban is enabled",
       "Service restart commands when auto_heal is enabled"
     ],
     "requires_root_when_enabled": true,
+    "operator_review_required": [
+      "Keep automation.dry_run=true during initial deployment and only disable it after reviewing audit notifications",
+      "Only enable auto_ban or auto_heal after reviewing whitelist, cooldown, TTL, and command_template settings",
+      "Prefer local MaxMind GeoIP.conf and geoipupdate; review the public mirror fallback before allowing that network path"
+    ],
     "data_egress": [
       "User-configured webhook endpoints",
       "Telegram bot API when Telegram delivery is enabled",
-      "OpenAI API when AI analysis is enabled"
+      "OpenAI API when AI analysis is enabled",
+      "raw.githubusercontent.com only when GeoIP auto-bootstrap fallback is triggered"
     ]
   },
   "scripts": {
@@ -127,9 +135,8 @@
     "default_database_file": "./metrics.db",
     "default_log_dir": "./logs/",
     "default_report_dir": "./reports/",
-    "default_data_dir": "./"
+    "default_data_dir": "./data/"
   },
   "created_at": "2026-03-26",
   "updated_at": "2026-03-28"
 }
-
