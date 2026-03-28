@@ -120,7 +120,7 @@ Recommended workflow:
    - Sign-up page: [GeoLite sign up](https://www.maxmind.com/en/geolite2/signup)
 2. Create a GeoLite2 license key in the MaxMind account portal.
    - License key guide: [Generate a License Key](https://support.maxmind.com/hc/en-us/articles/4407111582235-Generate-a-License-Key)
-3. Copy [`data/GeoIP.conf.example`](data/GeoIP.conf.example) to `./data/GeoIP.conf`.
+3. Create `./data/GeoIP.conf` manually.
 4. Fill in your real `AccountID` and `LicenseKey`.
 5. Keep `notifications.reports.geoip_city_db` pointing at `./data/GeoLite2-City.mmdb`.
 
@@ -840,4 +840,3 @@ sqlite3 ./metrics.db "SELECT site, ip_address, created_at, expires_at, lifted_at
 - Enable AI diagnosis for complex `error_event` alerts
 - Add GeoIP enrichment for country / region reports
 - Add signed or expiring report download URLs if the report host is public
-

@@ -9,7 +9,6 @@ metadata:
       - scripts/*
       - references/*
       - config.example.yaml
-      - data/GeoIP.conf.example
       - user-guide.md
       - _meta.json
 ---
@@ -143,4 +142,3 @@ Systemd note:
 - "Add 404 burst detection and webhook alerts."
 - "Explain today's top 5xx error in plain language."
 - "Plan a safe auto-heal flow for repeated 502 responses."
-

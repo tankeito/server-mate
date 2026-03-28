@@ -1,7 +1,0 @@
-# Copy this file to ./data/GeoIP.conf and keep the real file out of Git.
-# Used by the `geoipupdate` program, for versions >= 3.1.1.
-# Docs: https://dev.maxmind.com/geoip/updating-databases/
-
-AccountID YOUR_MAXMIND_ACCOUNT_ID
-LicenseKey YOUR_MAXMIND_LICENSE_KEY
-EditionIDs GeoLite2-ASN GeoLite2-City GeoLite2-Country

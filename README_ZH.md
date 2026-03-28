@@ -204,7 +204,7 @@ automation:
 ### 2.1 GeoIP 说明
 
 - 将你的 MaxMind 配置文件放在 `./data/GeoIP.conf`
-- 可以先参考 [`data/GeoIP.conf.example`](data/GeoIP.conf.example)，真实文件不要提交到 Git
+- 请手动创建 `./data/GeoIP.conf`，真实文件不要提交到 Git
 - 免费 GeoLite2 账号注册地址：[MaxMind GeoLite 注册](https://www.maxmind.com/en/geolite2/signup)
 - License Key 生成说明：[Generate a License Key](https://support.maxmind.com/hc/en-us/articles/4407111582235-Generate-a-License-Key)
 - `geoip_update_config` 是可选项，但推荐本地统一使用 `./data/GeoIP.conf`
@@ -481,8 +481,6 @@ server-mate/
 ├── README_ZH.md                # 中文说明
 ├── user-guide.md               # 详细部署指南
 ├── config.example.yaml         # 完整配置模板
-├── data/
-│   └── GeoIP.conf.example      # MaxMind GeoLite2 模板，复制为 ./data/GeoIP.conf
 ├── agents/
 │   └── openai.yaml             # OpenAI agent 接口配置
 ├── references/

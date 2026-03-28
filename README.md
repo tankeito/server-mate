@@ -204,7 +204,7 @@ automation:
 ### 2.1 GeoIP Notes
 
 - Put your MaxMind config at `./data/GeoIP.conf`
-- Start from [`data/GeoIP.conf.example`](data/GeoIP.conf.example) and keep the real file out of Git
+- Create `./data/GeoIP.conf` manually and keep the real file out of Git
 - Free GeoLite2 account: [MaxMind GeoLite sign up](https://www.maxmind.com/en/geolite2/signup)
 - License key guide: [Generate a License Key](https://support.maxmind.com/hc/en-us/articles/4407111582235-Generate-a-License-Key)
 - `geoip_update_config` is optional, but `./data/GeoIP.conf` is the recommended local path
@@ -481,8 +481,6 @@ server-mate/
 ├── README_ZH.md                # Chinese documentation
 ├── user-guide.md               # Detailed deployment guide
 ├── config.example.yaml         # Full example config template
-├── data/
-│   └── GeoIP.conf.example      # MaxMind GeoLite2 template; copy to ./data/GeoIP.conf
 ├── agents/
 │   └── openai.yaml             # OpenAI agent interface config
 ├── references/
