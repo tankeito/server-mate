@@ -219,6 +219,7 @@ DEFAULT_CONFIG = {
             "report_export_dir": "",
             "public_base_url": "",
             "geoip_city_db": "",
+            "geoip_update_config": "./data/GeoIP.conf",
             "ai_analysis": {
                 "enabled": True,
                 "simulate": False,
@@ -811,6 +812,13 @@ def normalize_config(config: dict[str, Any], config_path: Path) -> dict[str, Any
     if reports_config["geoip_city_db"]:
         reports_config["geoip_city_db"] = str(
             resolve_config_path(base_dir, reports_config["geoip_city_db"])
+        )
+    reports_config["geoip_update_config"] = str(
+        reports_config.get("geoip_update_config") or ""
+    ).strip()
+    if reports_config["geoip_update_config"]:
+        reports_config["geoip_update_config"] = str(
+            resolve_config_path(base_dir, reports_config["geoip_update_config"])
         )
 
     ai_analysis = reports_config.setdefault("ai_analysis", {})
@@ -2198,12 +2206,36 @@ def alert_ai_prompt(config: dict[str, Any], payload: dict[str, Any]) -> str:
     )
 
 
+def log_alert_ai_fallback(reason: str, settings: dict[str, Any]) -> None:
+    simulate_enabled = bool(settings.get("simulate"))
+    hint = (
+        " 请检查 config.yaml 中 notifications.reports.ai_analysis.simulate 是否误设为 true。"
+        if simulate_enabled
+        else ""
+    )
+    print(
+        f"Warning: AI 请求失败，使用本地兜底话术。原因: {reason}.{hint}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def request_alert_ai_diagnosis(config: dict[str, Any], payload: dict[str, Any]) -> str | None:
     settings = resolve_shared_ai_settings(config)
-    if not settings["enabled"] or settings["simulate"] or not settings["endpoint"]:
+    if not settings["enabled"]:
+        return None
+    if settings["simulate"]:
+        log_alert_ai_fallback("simulate=true，已显式启用本地兜底模式", settings)
+        return None
+    if not settings["endpoint"]:
+        log_alert_ai_fallback("未配置 ai_analysis.endpoint/base_url", settings)
         return None
     api_key = os.getenv(settings["api_key_env"])
     if not api_key:
+        log_alert_ai_fallback(
+            f"未读取到环境变量 {settings['api_key_env']}",
+            settings,
+        )
         return None
     endpoint = settings["endpoint"].rstrip("/")
     if endpoint.endswith("/v1"):
@@ -2230,11 +2262,13 @@ def request_alert_ai_diagnosis(config: dict[str, Any], payload: dict[str, Any]) 
     try:
         with urllib.request.urlopen(request, timeout=settings["timeout_seconds"]) as response:
             data = json.loads(response.read().decode("utf-8"))
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        log_alert_ai_fallback(str(exc), settings)
         return None
     try:
         return str(data["choices"][0]["message"]["content"]).strip()
     except (KeyError, IndexError, TypeError):
+        log_alert_ai_fallback("AI 响应格式不符合预期", settings)
         return None
 
 

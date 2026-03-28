@@ -1,6 +1,6 @@
 {
   "name": "server-mate",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "Lightweight server monitoring and AI operations workflow for Linux hosts running Nginx or Apache",
   "author": "tankeito",
   "license": "MIT",
@@ -14,6 +14,8 @@
     "ai-ops",
     "multi-site",
     "telegram",
+    "geoip",
+    "maxmind",
     "systemd",
     "ssh-security",
     "ssl-monitoring",
@@ -59,6 +61,7 @@
     "AI alert diagnosis with plain-language remediation hints",
     "AI-powered error diagnosis",
     "Daily/Weekly/Monthly PDF reports",
+    "GeoIP auto-provisioning via MaxMind GeoIP.conf or public mirror fallback",
     "SSL certificate expiry inspection in reports and webhook summaries",
     "PDF-safe long URL and referer truncation",
     "Guarded auto-ban and auto-heal automation"
@@ -68,6 +71,7 @@
     "WeCom webhook",
     "Feishu webhook",
     "Telegram bot API",
+    "MaxMind GeoLite2 via geoipupdate",
     "OpenClaw AI analyzer",
     "SQLite for local storage"
   ],
@@ -89,12 +93,14 @@
       "notifications.webhooks.*.url",
       "notifications.webhooks.telegram.bot_token",
       "notifications.webhooks.telegram.chat_id",
-      "notifications.ai_analysis.api_key_env"
+      "notifications.ai_analysis.api_key_env",
+      "./data/GeoIP.conf"
     ],
     "notes": [
       "OPENAI_API_KEY is strictly an optional environment variable, only needed if the user manually enables AI analysis.",
       "Telegram bot_token and chat_id may be stored in config.yaml or supplied via environment variables.",
-      "Webhook URLs and tokens are operator-supplied secrets stored in config.yaml."
+      "Webhook URLs and tokens are operator-supplied secrets stored in config.yaml.",
+      "GeoIP.conf stores MaxMind AccountID and LicenseKey and should stay local-only."
     ]
   },
   "security": {
@@ -124,5 +130,6 @@
     "default_data_dir": "./"
   },
   "created_at": "2026-03-26",
-  "updated_at": "2026-03-27"
+  "updated_at": "2026-03-28"
 }
+

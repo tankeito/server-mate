@@ -13,8 +13,10 @@ import shutil
 import socket
 import sqlite3
 import ssl
+import subprocess
 import sys
 import textwrap
+import unicodedata
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -70,10 +72,42 @@ PDF_COLORS = {
     "gray": "#94a3b8",
 }
 
+MORANDI_PALETTE = [
+    "#7C8A9B",
+    "#9AA690",
+    "#B79E8C",
+    "#AFA1BF",
+    "#9FA7A6",
+    "#C2B59B",
+    "#8E9AA8",
+    "#B7A39A",
+]
+
+CARD_COLORS = {
+    "face": "#FFFFFF",
+    "edge": "#ECECEC",
+    "muted": "#000000",
+    "subtle": "#000000",
+    "header": "#FAFAFA",
+    "zebra": "#F9F9F9",
+}
+
+ENTERPRISE_DONUT_COLORS = [
+    "#4E79A7",
+    "#F28E2B",
+    "#E15759",
+    "#76B7B2",
+    "#59A14F",
+    "#EDC948",
+    "#B07AA1",
+    "#FF9DA7",
+]
+
 PDF_FONT_PATHS = [
     Path(__file__).resolve().parents[1] / "assets" / "NotoSansSC-VF.ttf",
 ]
 GEOIP_MIRROR_URL = "https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-City.mmdb"
+DEFAULT_GEOIP_UPDATE_CONFIG = Path("./data/GeoIP.conf")
 SSL_WARNING_DAYS = 15
 
 TRANSLATIONS = {
@@ -552,6 +586,59 @@ def truncate_text(value: str, limit: int = 40) -> str:
     return value if len(value) <= limit else value[: max(limit - 3, 1)] + "..."
 
 
+def sanitize_long_table_text(
+    value: Any,
+    limit: int = 45,
+    *,
+    strip_query: bool = True,
+) -> str:
+    text = str(value or "").strip()
+    if strip_query:
+        text = text.split("?", 1)[0]
+    text = re.sub(r"\s+", " ", text)
+    if len(text) > limit:
+        text = text[: max(limit - 3, 1)] + "..."
+    return text or "-"
+
+
+def wrap_dashboard_text(value: Any, width: int = 40) -> str:
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return "-"
+
+    wrapped_lines: list[str] = []
+    limit = max(int(width), 1)
+    for raw_line in text.split("\n"):
+        line = re.sub(r"\s+", " ", raw_line).strip()
+        if not line:
+            wrapped_lines.append("")
+            continue
+        if re.search(r"[\u3400-\u9FFF]", line):
+            current = ""
+            current_width = 0
+            for char in line:
+                char_width = 2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1
+                if current and current_width + char_width > limit:
+                    wrapped_lines.append(current)
+                    current = char
+                    current_width = char_width
+                else:
+                    current += char
+                    current_width += char_width
+            if current:
+                wrapped_lines.append(current)
+            continue
+        wrapped_lines.append(
+            textwrap.fill(
+                line,
+                width=limit,
+                break_long_words=False,
+                break_on_hyphens=False,
+            )
+        )
+    return "\n".join(wrapped_lines).strip() or "-"
+
+
 def moving_average(values: list[float], window: int) -> list[float]:
     if not values:
         return []
@@ -851,7 +938,70 @@ def localized_unknown_region(config: dict[str, Any]) -> str:
 
 
 def localized_unknown_info(config: dict[str, Any]) -> str:
-    return "待配置 GeoIP" if report_language(config) == "zh" else "GeoIP Not Configured"
+    return "GeoIP 未配置" if report_language(config) == "zh" else "GeoIP Not Configured"
+
+
+def resolve_geoip_update_config(config: dict[str, Any]) -> Path | None:
+    reports = config.get("notifications", {}).get("reports", {})
+    raw_path = str(reports.get("geoip_update_config") or "").strip()
+    if raw_path:
+        return Path(raw_path).expanduser()
+    if DEFAULT_GEOIP_UPDATE_CONFIG.exists():
+        return DEFAULT_GEOIP_UPDATE_CONFIG
+    return None
+
+
+def try_geoipupdate_download(path: Path, config: dict[str, Any]) -> bool:
+    geoip_conf = resolve_geoip_update_config(config)
+    if not geoip_conf or not geoip_conf.exists():
+        return False
+
+    binary = shutil.which("geoipupdate")
+    if not binary:
+        print(
+            "[geoip] GeoIP.conf found but geoipupdate is not installed; falling back to public mirror.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return False
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    print(
+        f"[geoip] updating {path.name} with geoipupdate using {geoip_conf}...",
+        file=sys.stderr,
+        flush=True,
+    )
+    try:
+        result = subprocess.run(
+            [binary, "-f", str(geoip_conf), "-d", str(path.parent)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception as exc:
+        print(f"[geoip] geoipupdate execution failed: {exc}", file=sys.stderr, flush=True)
+        return False
+
+    if result.returncode != 0:
+        stderr_output = (result.stderr or "").strip()
+        detail = f" {stderr_output}" if stderr_output else ""
+        print(
+            f"[geoip] geoipupdate failed with exit code {result.returncode}; falling back to public mirror.{detail}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return False
+
+    if path.exists():
+        print(f"[geoip] saved to {path}", file=sys.stderr, flush=True)
+        return True
+
+    print(
+        f"[geoip] geoipupdate completed but {path.name} was not found in {path.parent}; falling back to public mirror.",
+        file=sys.stderr,
+        flush=True,
+    )
+    return False
 
 
 def ensure_geoip_city_db(config: dict[str, Any]) -> Path | None:
@@ -865,6 +1015,9 @@ def ensure_geoip_city_db(config: dict[str, Any]) -> Path | None:
         return path
 
     path.parent.mkdir(parents=True, exist_ok=True)
+    if try_geoipupdate_download(path, config):
+        return path
+
     temp_path = path.with_suffix(path.suffix + ".tmp")
     try:
         print(f"[geoip] downloading {path.name} from public mirror...", file=sys.stderr, flush=True)
@@ -1426,6 +1579,26 @@ def period_summary(
         }
         for item in daily_items
     ]
+    spider_daily_series = [
+        {
+            "date": item["meta"]["report_date"],
+            "counts": {
+                str(row["item"]): int(row["count"] or 0)
+                for row in (item.get("spiders") or [])
+            },
+        }
+        for item in daily_items
+    ]
+    status_family_series = [
+        {
+            "date": item["meta"]["report_date"],
+            "counts": {
+                str(row["item"]): int(row["count"] or 0)
+                for row in aggregate_status_families(item.get("status_codes") or [])
+            },
+        }
+        for item in daily_items
+    ]
 
     status_codes = query_grouped_counts(
         connection,
@@ -1595,6 +1768,8 @@ def period_summary(
         "slow_routes": slow_routes,
         "abnormal_ips": suspicious_ips,
         "traffic_series": traffic_series,
+        "spider_daily_series": spider_daily_series,
+        "status_family_series": status_family_series,
         "errors_total": sum_metric_rows(rows, "total_errors"),
         "wow": wow,
         "previous_summary": previous_summary,
@@ -2020,6 +2195,21 @@ def setup_pdf_style() -> None:
     matplotlib.rcParams["axes.facecolor"] = PDF_COLORS["panel"]
     matplotlib.rcParams["axes.edgecolor"] = PDF_COLORS["border"]
     matplotlib.rcParams["grid.color"] = PDF_COLORS["grid"]
+    matplotlib.rcParams["axes.grid"] = False
+    matplotlib.rcParams["axes.spines.top"] = False
+    matplotlib.rcParams["axes.spines.right"] = False
+    matplotlib.rcParams["axes.spines.left"] = False
+    matplotlib.rcParams["axes.spines.bottom"] = False
+    matplotlib.rcParams["xtick.major.size"] = 0
+    matplotlib.rcParams["ytick.major.size"] = 0
+    matplotlib.rcParams["xtick.minor.size"] = 0
+    matplotlib.rcParams["ytick.minor.size"] = 0
+    matplotlib.rcParams["font.size"] = 8
+    matplotlib.rcParams["axes.titlesize"] = 9
+    matplotlib.rcParams["legend.fontsize"] = 8
+    matplotlib.rcParams["xtick.labelsize"] = 8
+    matplotlib.rcParams["ytick.labelsize"] = 8
+    matplotlib.rcParams["axes.prop_cycle"] = matplotlib.cycler(color=MORANDI_PALETTE)
 
 
 def add_card(fig: Any, left: float, bottom: float, width: float, height: float, title: str, value: str, subtitle: str) -> None:
@@ -2794,7 +2984,7 @@ def wrap_report_text(value: str, width: int) -> str:
 def apply_axis_tick_fonts(ax: Any, size: float = 8.4) -> None:
     for label in list(ax.get_xticklabels()) + list(ax.get_yticklabels()):
         label.set_fontproperties(pdf_font(size))
-        label.set_color(PDF_COLORS["muted"])
+        label.set_color("#000000")
 
 
 def style_report_axis(ax: Any, title: str) -> None:
@@ -4799,19 +4989,28 @@ def draw_ai_review_card_black(ax: Any, review: dict[str, Any]) -> None:
     ax.set_axis_off()
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
-    panel = FancyBboxPatch(
-        (0.008, 0.03),
-        0.984,
-        0.94,
-        boxstyle="round,pad=0.020,rounding_size=0.028",
-        facecolor="#F4F8FB",
-        edgecolor="none",
-        transform=ax.transAxes,
-    )
-    ax.add_patch(panel)
+    wrapped = wrap_dashboard_text(review["summary"], width=66)
+    line_count = max(wrapped.count("\n") + 1, 1)
+    body_font_size = 7.8 if line_count >= 6 else 8.1
+    body_y = 0.72 if line_count >= 6 else 0.68
+    # Use an invisible text block to let bbox auto-size with the wrapped content,
+    # then draw the title/body separately so they never overlap each other.
+    background_text = f"{review['title']}\n\n{wrapped}\n"
     ax.text(
         0.045,
-        0.84,
+        0.93,
+        background_text,
+        ha="left",
+        va="top",
+        color=(0, 0, 0, 0),
+        linespacing=1.55,
+        fontproperties=pdf_font(body_font_size),
+        bbox=dict(facecolor="#F4F8FB", alpha=0.95, boxstyle="round,pad=1.0", edgecolor="none"),
+        transform=ax.transAxes,
+    )
+    ax.text(
+        0.045,
+        0.88,
         review["title"],
         ha="left",
         va="top",
@@ -4819,21 +5018,15 @@ def draw_ai_review_card_black(ax: Any, review: dict[str, Any]) -> None:
         fontproperties=pdf_font(10.2, "bold"),
         transform=ax.transAxes,
     )
-    wrapped = textwrap.fill(
-        review["summary"],
-        width=65,
-        break_long_words=True,
-        break_on_hyphens=False,
-    )
     ax.text(
         0.045,
-        0.62,
+        body_y,
         wrapped,
         ha="left",
         va="top",
         color="#000000",
-        linespacing=1.50,
-        fontproperties=pdf_font(7.6),
+        linespacing=1.55,
+        fontproperties=pdf_font(body_font_size),
         transform=ax.transAxes,
     )
 
@@ -4853,17 +5046,17 @@ def draw_baota_header_black(
     ax.text(0.0, 0.90, demo["title"], ha="left", va="top", color="#000000", fontproperties=pdf_font(15.5, "bold"), transform=ax.transAxes)
     ax.text(0.0, 0.54, demo["site"], ha="left", va="top", color="#000000", fontproperties=pdf_font(8.6), transform=ax.transAxes)
     ax.text(0.0, 0.23, demo["window"], ha="left", va="top", color="#000000", fontproperties=pdf_font(7.8), transform=ax.transAxes)
-    ax.text(1.0, 0.82, f"{labels['requests']}: {demo['total_requests']}", ha="right", va="top", color="#000000", fontproperties=pdf_font(9.6, "bold"), transform=ax.transAxes)
-    ax.text(1.0, 0.48, f"{labels['total_traffic']}: {demo['total_traffic']}", ha="right", va="top", color="#000000", fontproperties=pdf_font(9.6, "bold"), transform=ax.transAxes)
-    ax.text(1.0, 0.25, f"{labels['ssl_remaining']}: {demo.get('ssl_summary', 'N/A')}", ha="right", va="top", color="#000000", fontproperties=pdf_font(9.2, "bold"), transform=ax.transAxes)
+    ax.text(1.0, 0.88, f"{labels['requests']}: {demo['total_requests']}", ha="right", va="top", color="#000000", fontproperties=pdf_font(8.5, "bold"), transform=ax.transAxes)
+    ax.text(1.0, 0.64, f"{labels['total_traffic']}: {demo['total_traffic']}", ha="right", va="top", color="#000000", fontproperties=pdf_font(8.5, "bold"), transform=ax.transAxes)
+    ax.text(1.0, 0.42, f"{labels['ssl_remaining']}: {demo.get('ssl_summary', 'N/A')}", ha="right", va="top", color="#000000", fontproperties=pdf_font(8.3, "bold"), transform=ax.transAxes)
     ax.text(
         1.0,
-        0.06,
+        0.20,
         f"{labels['page_indicator'].format(current=page_number, total=total_pages)}  {labels['generated_at']}: {generated_at}",
         ha="right",
         va="top",
         color="#000000",
-        fontproperties=pdf_font(7.2),
+        fontproperties=pdf_font(6.9),
         transform=ax.transAxes,
     )
     ax.plot([0.0, 1.0], [0.02, 0.02], transform=ax.transAxes, color="#EAEAEA", linewidth=0.9)
@@ -4886,8 +5079,8 @@ def draw_baota_kpis_black(ax: Any, cards: list[dict[str, str]]) -> None:
 
 def apply_bt_axis_style_black(ax: Any, title: str) -> None:
     ax.set_facecolor("#FFFFFF")
-    ax.set_title(title, loc="left", pad=8, color="#000000", fontproperties=pdf_font(10.5, "bold"))
-    ax.grid(True, axis="y", linestyle="--", linewidth=0.5, color="#E0E0E0")
+    ax.set_title(title, loc="left", pad=8, color="#000000", fontproperties=pdf_font(9.2, "bold"))
+    ax.grid(False)
     for spine in ax.spines.values():
         spine.set_visible(False)
     ax.tick_params(axis="both", length=0, pad=4, colors="#000000", labelsize=7.6)
@@ -5535,8 +5728,8 @@ def draw_saas_table(
 
 def apply_bt_axis_style_black_v2(ax: Any, title: str, centered: bool = False) -> None:
     ax.set_facecolor("#FFFFFF")
-    ax.set_title(title, loc="center" if centered else "left", pad=10, color="#000000", fontproperties=pdf_font(10.5 if not centered else 16.0, "bold"))
-    ax.grid(True, axis="y", linestyle="--", linewidth=0.5, color="#E0E0E0")
+    ax.set_title(title, loc="center" if centered else "left", pad=10, color="#000000", fontproperties=pdf_font(9.2 if not centered else 9.4, "bold"))
+    ax.grid(False)
     for spine in ax.spines.values():
         spine.set_visible(False)
     ax.tick_params(axis="both", length=0, pad=4, colors="#000000", labelsize=7.6)
@@ -6168,6 +6361,8 @@ def summarize_ai_review(report: dict[str, Any], config: dict[str, Any]) -> dict[
     ai_block = report.get("ai_analysis") or {}
     text = str(ai_block.get("summary") or "").strip()
     source = str(ai_block.get("source") or "").strip() or "llm"
+    if looks_like_garbled_text(text):
+        text = ""
     if not text:
         text = request_ai_review(config, prompt)
         if not text:
@@ -6260,6 +6455,7 @@ def draw_baota_province_distribution_v3(ax: Any, demo: dict[str, Any], labels: d
     ax.set_xticks(x_positions)
     ax.set_xticklabels(categories, rotation=0, ha="center")
     ax.tick_params(axis="x", pad=6)
+    apply_axis_tick_fonts(ax, 7.0)
     ax.set_ylabel(labels["request_volume"], color="#000000", fontproperties=pdf_font(7.8))
     ax.set_ylim(0, max(visit_values) * 1.12 if visit_values else 1)
     ax_right = ax.twinx()
@@ -6424,7 +6620,7 @@ def build_hot_page_rows_from_report(report: dict[str, Any], config: dict[str, An
         uv_count = row.get("uv_count")
         rows.append(
             [
-                str(row.get("item") or "-"),
+                sanitize_long_table_text(row.get("item") or "-", limit=45, strip_query=True),
                 format_number(request_count),
                 format_number(uv_count) if uv_count is not None else "-",
                 format_number(request_count),
@@ -6437,7 +6633,7 @@ def build_hot_page_rows_from_report(report: dict[str, Any], config: dict[str, An
         request_count = int(row.get("count") or 0)
         rows.append(
             [
-                str(row.get("item") or "-"),
+                sanitize_long_table_text(row.get("item") or "-", limit=45, strip_query=True),
                 format_number(request_count),
                 "-",
                 format_number(request_count),
@@ -6453,7 +6649,7 @@ def build_hot_source_rows_from_report(report: dict[str, Any], config: dict[str, 
         request_count = int(row.get("request_count") or row.get("count") or 0)
         rows.append(
             [
-                str(row.get("item") or "-"),
+                sanitize_long_table_text(row.get("item") or "-", limit=45, strip_query=True),
                 format_number(request_count),
                 format_number(request_count),
                 format_bytes(int(row.get("bytes_out") or 0)) if int(row.get("bytes_out") or 0) > 0 else "-",
@@ -6594,6 +6790,827 @@ def build_dashboard_view(report: dict[str, Any], config: dict[str, Any]) -> dict
     }
 
 
+def compact_distribution(
+    distribution: dict[str, int],
+    *,
+    limit: int = 10,
+) -> dict[str, int]:
+    sorted_items = sorted(
+        (
+            (str(name), int(value))
+            for name, value in (distribution or {}).items()
+            if int(value) > 0
+        ),
+        key=lambda item: (-item[1], item[0]),
+    )
+    return {name: value for name, value in sorted_items[:limit]}
+
+
+def draw_distribution_bar_panel(
+    ax: Any,
+    title: str,
+    distribution: dict[str, int],
+    colors: list[str],
+    labels: dict[str, str],
+) -> None:
+    cleaned_distribution = compact_distribution(distribution, limit=10)
+    if not cleaned_distribution:
+        apply_bt_axis_style_black_v2(ax, title, centered=True)
+        ax.text(
+            0.5,
+            0.5,
+            labels["no_data"],
+            ha="center",
+            va="center",
+            color="#000000",
+            fontproperties=pdf_font(9.0),
+            transform=ax.transAxes,
+        )
+        ax.axis("off")
+        return
+    draw_baota_ring_stats_v2(ax, title, cleaned_distribution, colors, labels)
+
+
+def looks_like_garbled_text(text: str) -> bool:
+    compact = re.sub(r"\s+", "", str(text or ""))
+    if not compact:
+        return True
+    marker_count = compact.count("?") + compact.count("？") + compact.count("\ufffd")
+    return marker_count >= 4 and marker_count / max(len(compact), 1) >= 0.15
+
+
+def build_spider_trend_dataset(
+    report: dict[str, Any],
+    *,
+    limit: int = 5,
+) -> tuple[list[str], dict[str, list[int]]]:
+    top_distribution = compact_distribution(build_spider_distribution_map(report), limit=limit)
+    if not top_distribution:
+        return [], {}
+
+    series_rows = report.get("spider_daily_series") or []
+    if series_rows:
+        x_labels = [str(row.get("date") or "")[5:] for row in series_rows]
+        series_map = {name: [] for name in top_distribution}
+        for row in series_rows:
+            counts = row.get("counts") or {}
+            for name in series_map:
+                series_map[name].append(int(counts.get(name) or 0))
+        return x_labels, series_map
+
+    traffic_series = report.get("traffic_series") or []
+    if not traffic_series:
+        return [], {}
+
+    x_labels = [str(item.get("date") or "")[5:] for item in traffic_series]
+    total = max(sum(top_distribution.values()), 1)
+    series_map = {name: [] for name in top_distribution}
+    ordered_names = list(series_map.keys())
+    for item in traffic_series:
+        daily_total = int(item.get("spider_total") or 0)
+        allocated = 0
+        for index, name in enumerate(ordered_names):
+            if index == len(ordered_names) - 1:
+                value = max(daily_total - allocated, 0)
+            else:
+                value = int(round(daily_total * top_distribution[name] / total))
+                allocated += value
+            series_map[name].append(max(value, 0))
+    return x_labels, series_map
+
+
+def build_status_trend_dataset(report: dict[str, Any]) -> tuple[list[str], dict[str, list[int]]]:
+    overall_families = {
+        str(item.get("item") or ""): int(item.get("count") or 0)
+        for item in (report.get("status_families") or aggregate_status_families(report.get("status_codes") or []))
+        if int(item.get("count") or 0) > 0
+    }
+    family_order = [name for name in ("2xx", "3xx", "4xx", "5xx") if overall_families.get(name, 0) > 0]
+    if not family_order:
+        family_order = ["2xx", "3xx", "4xx", "5xx"]
+
+    series_rows = report.get("status_family_series") or []
+    if series_rows:
+        x_labels = [str(row.get("date") or "")[5:] for row in series_rows]
+        series_map = {family: [] for family in family_order}
+        for row in series_rows:
+            counts = row.get("counts") or {}
+            for family in family_order:
+                series_map[family].append(int(counts.get(family) or 0))
+        return x_labels, series_map
+
+    traffic_series = report.get("traffic_series") or []
+    if not traffic_series:
+        return [], {}
+
+    x_labels = [str(item.get("date") or "")[5:] for item in traffic_series]
+    total_family = max(sum(overall_families.get(name, 0) for name in family_order), 1)
+    share_4xx = overall_families.get("4xx", 0) / total_family
+    share_5xx = overall_families.get("5xx", 0) / total_family
+    share_3xx_base = overall_families.get("3xx", 0)
+    share_2xx_base = overall_families.get("2xx", 0)
+    share_3xx = share_3xx_base / max(share_2xx_base + share_3xx_base, 1)
+    series_map = {family: [] for family in family_order}
+    for item in traffic_series:
+        request_count = int(item.get("request_count") or 0)
+        four_xx = max(int(item.get("http_404_count") or 0), int(round(request_count * share_4xx)))
+        five_xx = max(int(item.get("http_5xx_count") or 0), int(round(request_count * share_5xx)))
+        remainder = max(request_count - four_xx - five_xx, 0)
+        three_xx = int(round(remainder * share_3xx))
+        two_xx = max(remainder - three_xx, 0)
+        derived = {"2xx": two_xx, "3xx": three_xx, "4xx": four_xx, "5xx": five_xx}
+        for family in family_order:
+            series_map[family].append(int(derived.get(family) or 0))
+    return x_labels, series_map
+
+
+def draw_spider_trend_panel(
+    ax: Any,
+    report: dict[str, Any],
+    config: dict[str, Any],
+    labels: dict[str, str],
+) -> None:
+    title = "蜘蛛抓取趋势" if report_language(config) == "zh" else "Spider Crawl Trend"
+    apply_bt_axis_style_black_v2(ax, title, centered=True)
+    x_labels, series_map = build_spider_trend_dataset(report, limit=5)
+    if not x_labels or not series_map:
+        ax.text(0.5, 0.5, labels["no_data"], ha="center", va="center", color="#000000", fontproperties=pdf_font(9.0), transform=ax.transAxes)
+        ax.axis("off")
+        return
+    palette = ["#2563EB", "#10B981", "#F59E0B", "#8B5CF6", "#06B6D4"]
+    x_positions = list(range(len(x_labels)))
+    for index, (name, values) in enumerate(series_map.items()):
+        color = palette[index % len(palette)]
+        ax.plot(
+            x_positions,
+            values,
+            color=color,
+            linewidth=1.6,
+            marker="o",
+            markersize=2.6,
+            label=localize_chart_item(name, labels),
+        )
+        ax.fill_between(x_positions, values, color=color, alpha=0.06)
+    ax.set_xlim(-0.2, len(x_positions) - 0.8 if len(x_positions) > 1 else 0.8)
+    tick_step = max(1, math.ceil(len(x_labels) / 6))
+    tick_positions = list(range(0, len(x_labels), tick_step))
+    if tick_positions and tick_positions[-1] != len(x_labels) - 1:
+        tick_positions.append(len(x_labels) - 1)
+    ax.set_xticks(tick_positions)
+    ax.set_xticklabels([x_labels[index] for index in tick_positions], rotation=28, ha="right")
+    apply_axis_tick_fonts(ax, 7.0)
+    if MaxNLocator is not None:
+        ax.yaxis.set_major_locator(MaxNLocator(4))
+    legend = ax.legend(loc="upper left", frameon=False, prop=pdf_font(6.8), ncol=2, handlelength=1.5)
+    for text in legend.get_texts():
+        text.set_color("#000000")
+
+
+def draw_status_trend_panel(
+    ax: Any,
+    report: dict[str, Any],
+    config: dict[str, str] | dict[str, Any],
+    labels: dict[str, str],
+) -> None:
+    title = "状态码趋势" if report_language(config) == "zh" else "HTTP Status Trend"
+    apply_bt_axis_style_black_v2(ax, title, centered=True)
+    x_labels, series_map = build_status_trend_dataset(report)
+    if not x_labels or not series_map:
+        ax.text(0.5, 0.5, labels["no_data"], ha="center", va="center", color="#000000", fontproperties=pdf_font(9.0), transform=ax.transAxes)
+        ax.axis("off")
+        return
+    family_colors = {"2xx": "#22C55E", "3xx": "#06B6D4", "4xx": "#F59E0B", "5xx": "#EF4444"}
+    x_positions = list(range(len(x_labels)))
+    ordered_families = list(series_map.keys())
+    ax.stackplot(
+        x_positions,
+        *[series_map[family] for family in ordered_families],
+        colors=[family_colors.get(family, "#94A3B8") for family in ordered_families],
+        alpha=0.20,
+        labels=ordered_families,
+    )
+    for family in ordered_families:
+        ax.plot(
+            x_positions,
+            series_map[family],
+            color=family_colors.get(family, "#94A3B8"),
+            linewidth=1.35,
+            label=family,
+        )
+    ax.set_xlim(-0.2, len(x_positions) - 0.8 if len(x_positions) > 1 else 0.8)
+    tick_step = max(1, math.ceil(len(x_labels) / 6))
+    tick_positions = list(range(0, len(x_labels), tick_step))
+    if tick_positions and tick_positions[-1] != len(x_labels) - 1:
+        tick_positions.append(len(x_labels) - 1)
+    ax.set_xticks(tick_positions)
+    ax.set_xticklabels([x_labels[index] for index in tick_positions], rotation=28, ha="right")
+    apply_axis_tick_fonts(ax, 7.0)
+    if MaxNLocator is not None:
+        ax.yaxis.set_major_locator(MaxNLocator(4))
+    legend = ax.legend(loc="upper left", frameon=False, prop=pdf_font(6.8), ncol=2, handlelength=1.5)
+    for text in legend.get_texts():
+        text.set_color("#000000")
+
+
+def locale_text(config: dict[str, Any], zh: str, en: str) -> str:
+    return zh if report_language(config) == "zh" else en
+
+
+def draw_enterprise_card_shell(ax: Any, title: str, subtitle: str | None = None) -> None:
+    ax.set_axis_off()
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    title_text = wrap_dashboard_text(title, width=26)
+    subtitle_text = wrap_dashboard_text(subtitle, width=42) if subtitle else None
+    patch = FancyBboxPatch(
+        (0.0, 0.0),
+        1.0,
+        1.0,
+        boxstyle="round,pad=0.014,rounding_size=0.040",
+        facecolor=CARD_COLORS["face"],
+        edgecolor=CARD_COLORS["edge"],
+        linewidth=0.8,
+        transform=ax.transAxes,
+        clip_on=False,
+    )
+    ax.add_patch(patch)
+    ax.text(
+        0.05,
+        0.93,
+        title_text,
+        ha="left",
+        va="top",
+        color="#111111",
+        linespacing=1.25,
+        fontproperties=pdf_font(9.0, "bold"),
+        transform=ax.transAxes,
+    )
+    if subtitle_text:
+        ax.text(
+            0.05,
+            0.84,
+            subtitle_text,
+            ha="left",
+            va="top",
+            color="#000000",
+            linespacing=1.28,
+            fontproperties=pdf_font(7.2),
+            transform=ax.transAxes,
+        )
+
+
+def draw_enterprise_donut_card(
+    ax: Any,
+    title: str,
+    distribution: dict[str, int],
+    colors: list[str],
+    labels: dict[str, str],
+    center_caption: str,
+) -> None:
+    draw_enterprise_card_shell(ax, title)
+    cleaned_distribution = compact_distribution(distribution, limit=5)
+    if not cleaned_distribution:
+        ax.text(0.5, 0.48, labels["no_data"], ha="center", va="center", color="#000000", fontproperties=pdf_font(8.0), transform=ax.transAxes)
+        return
+    chart_ax = ax.inset_axes([0.06, 0.12, 0.48, 0.70])
+    chart_ax.set_axis_off()
+    chart_ax.set_aspect("equal")
+    localized_items = [(localize_chart_item(name, labels), value) for name, value in cleaned_distribution.items()]
+    values = [value for _, value in localized_items]
+    total = max(sum(values), 1)
+    wedges, _ = chart_ax.pie(
+        values,
+        colors=colors[: len(values)],
+        startangle=90,
+        counterclock=False,
+        labels=None,
+        wedgeprops={"width": 0.26, "edgecolor": CARD_COLORS["face"], "linewidth": 1.2},
+        radius=0.94,
+    )
+    chart_ax.text(0.0, 0.04, format_number(total), ha="center", va="center", color="#111111", fontproperties=pdf_font(10.5, "bold"))
+    chart_ax.text(0.0, -0.16, center_caption, ha="center", va="center", color="#000000", fontproperties=pdf_font(6.8))
+    legend_labels = [f"{name}  {value / total * 100:.1f}%" for name, value in localized_items]
+    legend = chart_ax.legend(
+        wedges,
+        legend_labels,
+        loc="upper left",
+        bbox_to_anchor=(1.02, 0.96),
+        frameon=False,
+        prop=pdf_font(6.7),
+        handlelength=1.1,
+        borderaxespad=0.0,
+        labelspacing=0.8,
+        handletextpad=0.6,
+    )
+    for text in legend.get_texts():
+        text.set_color("#000000")
+
+
+def draw_enterprise_metrics_card(
+    ax: Any,
+    title: str,
+    metrics: list[dict[str, str]],
+) -> None:
+    draw_enterprise_card_shell(ax, title)
+    y_positions = [0.75, 0.49, 0.23]
+    for metric, y_pos in zip(metrics[:3], y_positions):
+        value_text = str(metric.get("value") or "-")
+        value_font = 18.5 if len(value_text) <= 10 else 14.0
+        ax.text(0.06, y_pos + 0.08, str(metric.get("label") or ""), ha="left", va="top", color="#000000", fontproperties=pdf_font(7.4), transform=ax.transAxes)
+        ax.text(0.06, y_pos - 0.01, value_text, ha="left", va="center", color="#111111", fontproperties=pdf_font(value_font, "bold"), transform=ax.transAxes)
+        note_text = wrap_dashboard_text(str(metric.get("note") or ""), width=26)
+        ax.text(0.06, y_pos - 0.12, note_text, ha="left", va="top", color="#000000", linespacing=1.35, fontproperties=pdf_font(6.8), transform=ax.transAxes)
+
+
+def draw_enterprise_table_body(
+    ax: Any,
+    headers: list[str],
+    rows: list[list[str]],
+    col_widths: list[float],
+    *,
+    alignments: dict[int, str] | None = None,
+    truncate_rules: dict[int, dict[str, Any]] | None = None,
+    empty_label: str,
+) -> None:
+    alignments = alignments or {}
+    truncate_rules = truncate_rules or {}
+    normalized_rows = pad_table_rows(rows, len(headers), empty_label=empty_label)
+    prepared_rows: list[list[str]] = []
+    for row in normalized_rows:
+        prepared_row: list[str] = []
+        for column_index, value in enumerate(row):
+            text = str(value or "")
+            if column_index in truncate_rules and text:
+                options = truncate_rules[column_index]
+                text = sanitize_long_table_text(
+                    text,
+                    limit=int(options.get("limit", 40)),
+                    strip_query=bool(options.get("strip_query", False)),
+                )
+            if alignments.get(column_index) == "left" and text:
+                text = f"  {text}"
+            prepared_row.append(text)
+        prepared_rows.append(prepared_row)
+
+    ax.set_axis_off()
+    ax.axis("off")
+    table = ax.table(
+        cellText=prepared_rows,
+        colLabels=headers,
+        bbox=[0.0, 0.0, 1.0, 1.0],
+        cellLoc="center",
+        colLoc="center",
+        colWidths=col_widths,
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(7.4)
+    total_rows = max(len(prepared_rows) + 1, 1)
+    row_height = min(0.088, 0.96 / total_rows)
+    header_height = max(row_height * 1.18, 0.09)
+    for (row_index, column_index), cell in table.get_celld().items():
+        if column_index < len(col_widths):
+            cell.set_width(col_widths[column_index])
+        cell.set_height(header_height if row_index == 0 else row_height)
+        cell.set_edgecolor(CARD_COLORS["edge"])
+        cell.set_linewidth(0.6)
+        cell.visible_edges = "B"
+        cell.PAD = 0.08
+        cell.get_text().set_color("#111111")
+        cell.get_text().set_va("center")
+        if row_index == 0:
+            cell.set_facecolor(CARD_COLORS["header"])
+            cell.get_text().set_fontproperties(pdf_font(7.4, "bold"))
+            cell.get_text().set_ha("center")
+        else:
+            cell.set_facecolor("#FFFFFF" if row_index % 2 == 1 else CARD_COLORS["zebra"])
+            cell.get_text().set_fontproperties(pdf_font(7.2))
+            cell.get_text().set_ha(alignments.get(column_index, "center"))
+
+
+def draw_enterprise_table_card(
+    ax: Any,
+    title: str,
+    headers: list[str],
+    rows: list[list[str]],
+    col_widths: list[float],
+    *,
+    subtitle: str | None = None,
+    alignments: dict[int, str] | None = None,
+    truncate_rules: dict[int, dict[str, Any]] | None = None,
+    empty_label: str,
+) -> None:
+    draw_enterprise_card_shell(ax, title, subtitle)
+    table_ax = ax.inset_axes([0.04, 0.08, 0.92, 0.68 if subtitle else 0.74])
+    draw_enterprise_table_body(
+        table_ax,
+        headers,
+        rows,
+        col_widths,
+        alignments=alignments,
+        truncate_rules=truncate_rules,
+        empty_label=empty_label,
+    )
+
+
+def build_traffic_uri_card_rows(view: dict[str, Any]) -> list[list[str]]:
+    rows: list[list[str]] = []
+    for index, row in enumerate((view.get("hot_page_rows") or [])[:10], start=1):
+        path = sanitize_long_table_text(str(row[0]), limit=40, strip_query=True)
+        rows.append([str(index), path, str(row[3]), str(row[4])])
+    return rows
+
+
+def build_traffic_ip_card_rows(view: dict[str, Any]) -> list[list[str]]:
+    rows: list[list[str]] = []
+    for index, row in enumerate((view.get("hot_ip_rows") or [])[:10], start=1):
+        rows.append([str(index), str(row[0]), str(row[1]), str(row[2])])
+    return rows
+
+
+def build_spider_metrics(report: dict[str, Any], config: dict[str, Any], labels: dict[str, str]) -> list[dict[str, str]]:
+    spiders = sorted((report.get("spiders") or []), key=lambda item: (-int(item.get("count") or 0), str(item.get("item") or "")))
+    total = total_spider_count(report)
+    top_name = localize_chart_item(str(spiders[0].get("item") or labels["other"]), labels) if spiders else labels["other"]
+    top_count = int(spiders[0].get("count") or 0) if spiders else 0
+    top_share = safe_ratio(top_count, total) * 100.0
+    day_count = int(report.get("meta", {}).get("days") or 1)
+    avg_daily = int(round(total / max(day_count, 1)))
+    return [
+        {
+            "label": locale_text(config, "总爬取次数", "Total Crawls"),
+            "value": format_number(total),
+            "note": locale_text(config, f"{day_count} 天累计，日均 {format_number(avg_daily)}", f"{day_count}-day total, avg {format_number(avg_daily)}/day"),
+        },
+        {
+            "label": locale_text(config, "主力爬虫占比", "Dominant Bot"),
+            "value": f"{top_share:.1f}%",
+            "note": f"{top_name} · {format_number(top_count)}",
+        },
+        {
+            "label": locale_text(config, "活跃爬虫种类", "Active Families"),
+            "value": str(len(spiders)),
+            "note": locale_text(config, "按抓取量统计的活跃蜘蛛家族", "Families observed in this period"),
+        },
+    ]
+
+
+def build_status_metrics(report: dict[str, Any], config: dict[str, Any]) -> list[dict[str, str]]:
+    families = {
+        str(item.get("item") or ""): int(item.get("count") or 0)
+        for item in (report.get("status_families") or aggregate_status_families(report.get("status_codes") or []))
+    }
+    four_xx = int(families.get("4xx", 0))
+    five_xx = int(families.get("5xx", 0))
+    total_requests = int(report.get("traffic", {}).get("request_count") or 0)
+    error_ratio = safe_ratio(four_xx + five_xx, total_requests) * 100.0
+    previous_summary = report.get("previous_summary") or {}
+    previous_families = {
+        str(item.get("item") or ""): int(item.get("count") or 0)
+        for item in (previous_summary.get("status_families") or aggregate_status_families(previous_summary.get("status_codes") or []))
+    }
+    previous_requests = int(previous_summary.get("traffic", {}).get("request_count") or 0)
+    previous_error_ratio = safe_ratio(
+        int(previous_families.get("4xx", 0)) + int(previous_families.get("5xx", 0)),
+        previous_requests,
+    ) * 100.0 if previous_requests else None
+    if previous_error_ratio is None or previous_error_ratio == 0:
+        compare_value = "N/A"
+        compare_note = locale_text(config, "无可用的上一周期基线", "No previous baseline")
+    else:
+        ratio_delta = ((error_ratio - previous_error_ratio) / previous_error_ratio) * 100.0
+        compare_value = f"{ratio_delta:+.1f}%"
+        compare_note = locale_text(config, f"上一周期错误率 {previous_error_ratio:.1f}%", f"Previous error ratio {previous_error_ratio:.1f}%")
+    return [
+        {
+            "label": locale_text(config, "错误请求占比", "Error Ratio"),
+            "value": f"{error_ratio:.1f}%",
+            "note": locale_text(config, "4xx + 5xx 占总请求比例", "4xx + 5xx against total requests"),
+        },
+        {
+            "label": locale_text(config, "5xx 请求总数", "Total 5xx"),
+            "value": format_number(five_xx),
+            "note": locale_text(config, f"4xx {format_number(four_xx)} · 5xx {format_number(five_xx)}", f"4xx {format_number(four_xx)} · 5xx {format_number(five_xx)}"),
+        },
+        {
+            "label": locale_text(config, "上周期对比", "Previous Period"),
+            "value": compare_value,
+            "note": compare_note,
+        },
+    ]
+
+
+def draw_enterprise_text_card(
+    ax: Any,
+    title: str,
+    body: str,
+    *,
+    subtitle: str | None = None,
+    width: int = 20,
+) -> None:
+    draw_enterprise_card_shell(ax, title, subtitle)
+    wrapped = wrap_dashboard_text(body, width=width)
+    line_count = max(wrapped.count("\n") + 1, 1)
+    body_font_size = 7.0 if line_count >= 7 else 7.2
+    ax.text(
+        0.06,
+        0.72 if subtitle else 0.78,
+        wrapped,
+        ha="left",
+        va="top",
+        color="#000000",
+        linespacing=1.45,
+        fontproperties=pdf_font(body_font_size),
+        transform=ax.transAxes,
+    )
+
+
+def draw_enterprise_chart_card(
+    ax: Any,
+    title: str,
+    renderer: Any,
+    *,
+    subtitle: str | None = None,
+    inset: tuple[float, float, float, float] | None = None,
+) -> None:
+    draw_enterprise_card_shell(ax, title, subtitle)
+    resolved_inset = inset or ((0.07, 0.14, 0.86, 0.60) if subtitle else (0.07, 0.14, 0.86, 0.68))
+    inner_ax = ax.inset_axes(resolved_inset)
+    renderer(inner_ax)
+
+
+def build_top_share_summary(
+    rows: list[tuple[str, int]],
+    config: dict[str, Any],
+    *,
+    dimension_label: str,
+    metric_label: str,
+) -> str:
+    if not rows:
+        return locale_text(config, f"{dimension_label}暂无有效数据。", f"No {dimension_label.lower()} data is available.")
+    total = max(sum(value for _, value in rows), 1)
+    top_name, top_value = rows[0]
+    share = top_value / total * 100.0
+    extra = ""
+    if len(rows) > 1:
+        second_name, second_value = rows[1]
+        extra = locale_text(
+            config,
+            f" 其次为{second_name}，占比约 {second_value / total * 100.0:.1f}%。",
+            f" {second_name} follows at roughly {second_value / total * 100.0:.1f}%.",
+        )
+    return locale_text(
+        config,
+        f"{dimension_label}以{top_name}为主，{metric_label}{format_number(top_value)}，占比约 {share:.1f}%。{extra}",
+        f"{dimension_label} is led by {top_name} with {format_number(top_value)} {metric_label.lower()}, about {share:.1f}% of the total.{extra}",
+    )
+
+
+def request_dimension_ai_insight(
+    config: dict[str, Any],
+    dimension_title: str,
+    payload_rows: list[tuple[str, int]],
+    *,
+    metric_label: str,
+) -> str | None:
+    settings = resolve_ai_settings(config)
+    if not settings["enabled"] or settings["simulate"] or not settings["endpoint"]:
+        return None
+    prompt = (
+        f"你是一名运维分析师。请根据以下 {dimension_title} Top 数据，用中文输出约 50 字的精简点评，"
+        "只需描述最核心的结构特征与风险，不要分点：\n"
+        f"{json.dumps(payload_rows[:3], ensure_ascii=False)}"
+        if report_language(config) == "zh"
+        else (
+            f"You are an operations analyst. Based on the following top {dimension_title} rows, "
+            "write a concise 40-60 word insight in English. Focus on the dominant source and any anomaly risk.\n"
+            f"{json.dumps(payload_rows[:3], ensure_ascii=False)}"
+        )
+    )
+    text = request_ai_review(config, prompt)
+    if text and not looks_like_garbled_text(text):
+        return text
+    return None
+
+
+def summarize_dimension_insight(
+    config: dict[str, Any],
+    dimension_title: str,
+    payload_rows: list[tuple[str, int]],
+    *,
+    metric_label: str,
+) -> str:
+    ai_text = request_dimension_ai_insight(
+        config,
+        dimension_title,
+        payload_rows,
+        metric_label=metric_label,
+    )
+    if ai_text:
+        return ai_text
+    return build_top_share_summary(
+        payload_rows,
+        config,
+        dimension_label=dimension_title,
+        metric_label=metric_label,
+    )
+
+
+def build_province_insight(report: dict[str, Any], config: dict[str, Any]) -> str:
+    rows = sorted(
+        (
+            (str(row.get("item") or localized_unknown_region(config)), int(row.get("request_count") or 0))
+            for row in (report.get("province_distribution") or [])
+        ),
+        key=lambda item: (-item[1], item[0]),
+    )
+    return summarize_dimension_insight(
+        config,
+        locale_text(config, "省份流量", "Province traffic"),
+        rows,
+        metric_label=locale_text(config, "请求", "requests"),
+    )
+
+
+def build_client_insight(report: dict[str, Any], config: dict[str, Any]) -> str:
+    rows = sorted(
+        (
+            (str(row.get("item") or localized_unclassified(config)), int(row.get("request_count") or row.get("count") or 0))
+            for row in (report.get("client_families") or [])
+        ),
+        key=lambda item: (-item[1], item[0]),
+    )
+    return summarize_dimension_insight(
+        config,
+        locale_text(config, "客户端分布", "Client distribution"),
+        rows,
+        metric_label=locale_text(config, "访问量", "visits"),
+    )
+
+
+def draw_daily_spider_status_page(
+    pdf: Any,
+    report: dict[str, Any],
+    config: dict[str, Any],
+    view: dict[str, Any],
+    labels: dict[str, str],
+    generated_at: str,
+    total_pages: int,
+    spider_chart_distribution: dict[str, int],
+    status_chart_distribution: dict[str, int],
+    spider_top_rows: list[list[str]],
+    status_top_rows: list[list[str]],
+) -> None:
+    page = create_baota_daily_figure()
+    page.subplots_adjust(left=0.055, right=0.945, top=0.985, bottom=0.040, hspace=0.22, wspace=0.16)
+    grid = page.add_gridspec(3, 12, height_ratios=[0.68, 2.18, 2.72])
+    draw_baota_header_black(page.add_subplot(grid[0, :]), report, view, labels, generated_at, 3, total_pages)
+    top_grid = grid[1, :].subgridspec(1, 2, wspace=0.16)
+    draw_enterprise_donut_card(
+        page.add_subplot(top_grid[0, 0]),
+        locale_text(config, "蜘蛛抓取占比", "Crawler Mix"),
+        spider_chart_distribution,
+        ENTERPRISE_DONUT_COLORS,
+        labels,
+        locale_text(config, "抓取次数", "Crawls"),
+    )
+    draw_enterprise_donut_card(
+        page.add_subplot(top_grid[0, 1]),
+        locale_text(config, "状态码占比", "Status Mix"),
+        status_chart_distribution,
+        ["#4E79A7", "#59A14F", "#F28E2B", "#E15759", "#76B7B2", "#EDC948"],
+        labels,
+        locale_text(config, "请求总量", "Requests"),
+    )
+    bottom_grid = grid[2, :].subgridspec(1, 2, wspace=0.16)
+    draw_enterprise_table_card(
+        page.add_subplot(bottom_grid[0, 0]),
+        dynamic_top_title(labels["crawler_top10"], len(spider_top_rows)),
+        [labels["rank"], labels["item"], labels["request_volume"], labels["share"]],
+        spider_top_rows or fallback_table_rows(4, config),
+        [0.10, 0.50, 0.16, 0.24],
+        alignments={0: "center", 1: "left", 2: "center", 3: "center"},
+        empty_label=labels["no_data"],
+    )
+    draw_enterprise_table_card(
+        page.add_subplot(bottom_grid[0, 1]),
+        dynamic_top_title(labels["status_detail_top10"], len(status_top_rows)),
+        [labels["rank"], labels["status_code"], labels["request_volume"], labels["share"]],
+        status_top_rows or fallback_table_rows(4, config),
+        [0.10, 0.34, 0.24, 0.32],
+        alignments={0: "center", 1: "left", 2: "center", 3: "center"},
+        empty_label=labels["no_data"],
+    )
+    pdf.savefig(page, facecolor="#FFFFFF")
+    plt.close(page)
+
+
+def draw_compact_province_chart(ax: Any, view: dict[str, Any], labels: dict[str, str]) -> None:
+    categories = list(view.get("province_categories") or [])[:6]
+    visit_values = list(view.get("province_visit_values") or [])[:6]
+    ip_values = list(view.get("province_ip_values") or [])[:6]
+    apply_bt_axis_style_black_v2(ax, "", centered=False)
+    if not categories or not visit_values:
+        ax.text(0.5, 0.5, labels["no_data"], ha="center", va="center", color="#000000", fontproperties=pdf_font(8.0), transform=ax.transAxes)
+        ax.axis("off")
+        return
+    x_positions = list(range(len(categories)))
+    ax.bar(x_positions, visit_values, width=0.54, color="#6BAED6", alpha=0.95)
+    ax.plot(x_positions, ip_values, color="#F28E2B", linewidth=1.5, marker="o", markersize=2.4)
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels([truncate_text(str(item), 10) for item in categories], rotation=18, ha="right")
+    ax.set_xlim(-0.4, len(x_positions) - 0.6 if len(x_positions) > 1 else 0.6)
+    apply_axis_tick_fonts(ax, 7.0)
+
+
+def draw_period_province_page(
+    pdf: Any,
+    report: dict[str, Any],
+    config: dict[str, Any],
+    view: dict[str, Any],
+    labels: dict[str, str],
+    generated_at: str,
+    page_number: int,
+    total_pages: int,
+    province_table_rows: list[list[str]],
+) -> None:
+    page = create_baota_daily_figure()
+    page.subplots_adjust(left=0.055, right=0.945, top=0.985, bottom=0.040, hspace=0.19, wspace=0.14)
+    grid = page.add_gridspec(3, 12, height_ratios=[0.68, 2.22, 2.98])
+    draw_baota_header_black(page.add_subplot(grid[0, :]), report, view, labels, generated_at, page_number, total_pages)
+    top_grid = grid[1, :].subgridspec(1, 2, wspace=0.14)
+    draw_enterprise_chart_card(
+        page.add_subplot(top_grid[0, 0]),
+        labels["province_access_distribution"],
+        lambda inner_ax: draw_compact_province_chart(inner_ax, view, labels),
+        subtitle=locale_text(config, "聚焦访问量与活跃 IP 的区域集中度", "Focus on visits and active IP concentration"),
+        inset=(0.07, 0.17, 0.87, 0.60),
+    )
+    draw_enterprise_text_card(
+        page.add_subplot(top_grid[0, 1]),
+        locale_text(config, "AI 专属点评", "AI Insight"),
+        build_province_insight(report, config),
+        subtitle=locale_text(config, "基于 Top 3 省份来源的结构性总结", "Based on the top 3 regions"),
+        width=18,
+    )
+    draw_enterprise_table_card(
+        page.add_subplot(grid[2, :]),
+        dynamic_top_title(labels["province_top10"], len(province_table_rows)),
+        [labels["province"], labels["ips"], labels["request_volume"]],
+        province_table_rows,
+        [0.44, 0.22, 0.34],
+        subtitle=locale_text(config, "完整地区明细，支持横向比对访问质量", "Full regional detail for cross comparison"),
+        alignments={0: "left", 1: "center", 2: "center"},
+        empty_label=labels["no_data"],
+    )
+    pdf.savefig(page, facecolor="#FFFFFF")
+    plt.close(page)
+
+
+def draw_period_client_page(
+    pdf: Any,
+    report: dict[str, Any],
+    config: dict[str, Any],
+    view: dict[str, Any],
+    labels: dict[str, str],
+    generated_at: str,
+    page_number: int,
+    total_pages: int,
+    client_chart_distribution: dict[str, int],
+    client_table_rows: list[list[str]],
+) -> None:
+    page = create_baota_daily_figure()
+    page.subplots_adjust(left=0.055, right=0.945, top=0.985, bottom=0.040, hspace=0.19, wspace=0.14)
+    grid = page.add_gridspec(3, 12, height_ratios=[0.68, 2.22, 2.98])
+    draw_baota_header_black(page.add_subplot(grid[0, :]), report, view, labels, generated_at, page_number, total_pages)
+    top_grid = grid[1, :].subgridspec(1, 2, wspace=0.14)
+    draw_enterprise_donut_card(
+        page.add_subplot(top_grid[0, 0]),
+        labels["client_distribution"],
+        client_chart_distribution,
+        ENTERPRISE_DONUT_COLORS,
+        labels,
+        locale_text(config, "访问量", "Visits"),
+    )
+    draw_enterprise_text_card(
+        page.add_subplot(top_grid[0, 1]),
+        locale_text(config, "AI 专属点评", "AI Insight"),
+        build_client_insight(report, config),
+        subtitle=locale_text(config, "基于 Top 3 客户端的结构性总结", "Based on the top 3 client families"),
+        width=18,
+    )
+    draw_enterprise_table_card(
+        page.add_subplot(grid[2, :]),
+        dynamic_top_title(labels["client_top10"], len(client_table_rows)),
+        [labels["client"], labels["visit_volume"], labels["share"]],
+        client_table_rows,
+        [0.44, 0.28, 0.28],
+        subtitle=locale_text(config, "完整客户端明细，观察浏览器与自动化占比", "Full client detail for browser and automation analysis"),
+        alignments={0: "left", 1: "center", 2: "center"},
+        empty_label=labels["no_data"],
+    )
+    pdf.savefig(page, facecolor="#FFFFFF")
+    plt.close(page)
+
 def render_dashboard_pdf(
     report: dict[str, Any],
     config: dict[str, Any],
@@ -6603,14 +7620,26 @@ def render_dashboard_pdf(
     view = build_dashboard_view(report, config)
     ai_review = summarize_ai_review(report, config)
     generated_at = dt.datetime.now(get_timezone(config)).strftime("%Y-%m-%d %H:%M")
-    total_pages = 4
+    report_kind = str(report.get("meta", {}).get("report_kind") or "daily")
+    split_security_pages = report_kind in {"weekly", "monthly"}
+    total_pages = 6 if split_security_pages else 4
     spider_top_rows = build_rank_share_rows_v2(view["spider_distribution"], labels, 10)
     status_top_rows = build_rank_share_rows_v2(view["status_distribution"], labels, 10)
     province_table_rows = view["province_rows"][:10]
     client_table_rows = build_client_table_rows_from_distribution(view["client_distribution"], limit=10)
     client_chart_distribution = collapse_distribution_for_donut_v2(
         view["client_distribution"],
-        limit=7,
+        limit=5,
+        other_label=labels["other"],
+    )
+    spider_chart_distribution = collapse_distribution_for_donut_v2(
+        view["spider_distribution"],
+        limit=5,
+        other_label=labels["other"],
+    )
+    status_chart_distribution = collapse_distribution_for_donut_v2(
+        view["status_distribution"],
+        limit=5,
         other_label=labels["other"],
     )
     hot_page_headers = [
@@ -6629,190 +7658,232 @@ def render_dashboard_pdf(
 
     with PdfPages(output_path) as pdf:
         page_one = create_baota_daily_figure()
-        page_one.subplots_adjust(left=0.075, right=0.925, top=0.985, bottom=0.04, hspace=0.36, wspace=0.28)
-        grid_one = page_one.add_gridspec(5, 12, height_ratios=[0.72, 1.24, 0.92, 3.42, 2.28])
+        page_one.subplots_adjust(left=0.060, right=0.940, top=0.985, bottom=0.040, hspace=0.28, wspace=0.18)
+        grid_one = page_one.add_gridspec(5, 12, height_ratios=[0.72, 1.50, 0.90, 3.12, 2.26])
         draw_baota_header_black(page_one.add_subplot(grid_one[0, :]), report, view, labels, generated_at, 1, total_pages)
         draw_ai_review_card_black(page_one.add_subplot(grid_one[1, :]), ai_review)
         draw_baota_kpis_black(page_one.add_subplot(grid_one[2, :]), build_baota_period_kpis(report, config))
-        draw_baota_three_line_series_black(
+        draw_enterprise_chart_card(
             page_one.add_subplot(grid_one[3, :]),
             view["trend_title"],
-            view["x_labels"],
-            view["trend"]["pv"],
-            view["trend"]["uv"],
-            view["trend"]["ip"],
-            labels,
-            rotation=view["x_rotation"],
+            lambda inner_ax: draw_baota_three_line_series_black(
+                inner_ax,
+                "",
+                view["x_labels"],
+                view["trend"]["pv"],
+                view["trend"]["uv"],
+                view["trend"]["ip"],
+                labels,
+                rotation=view["x_rotation"],
+            ),
+            inset=(0.05, 0.12, 0.91, 0.74),
         )
         bottom_row = grid_one[4, :].subgridspec(1, 3, width_ratios=[45, 10, 45], wspace=0.0)
-        draw_baota_dual_axis_chart_black(
+        draw_enterprise_chart_card(
             page_one.add_subplot(bottom_row[0, 0]),
             labels["performance_load"],
-            view["x_labels"],
-            view["performance"]["qps"],
-            view["performance"]["response_ms"],
-            "QPS",
-            "平均响应耗时(ms)" if report_language(config) == "zh" else "Avg Response (ms)",
-            "#2563EB",
-            "#EF4444",
+            lambda inner_ax: draw_baota_dual_axis_chart_black(
+                inner_ax,
+                "",
+                view["x_labels"],
+                view["performance"]["qps"],
+                view["performance"]["response_ms"],
+                "QPS",
+                "平均响应耗时(ms)" if report_language(config) == "zh" else "Avg Response (ms)",
+                "#2563EB",
+                "#EF4444",
+            ),
+            inset=(0.07, 0.16, 0.86, 0.62),
         )
-        draw_baota_dual_axis_chart_black(
+        draw_enterprise_chart_card(
             page_one.add_subplot(bottom_row[0, 2]),
             labels["website_traffic"],
-            view["x_labels"],
-            view["network"]["upload_kb"],
-            view["network"]["download_kb"],
-            "上行 KB" if report_language(config) == "zh" else "Upload KB",
-            "下行 KB" if report_language(config) == "zh" else "Download KB",
-            "#F59E0B",
-            "#10B981",
+            lambda inner_ax: draw_baota_dual_axis_chart_black(
+                inner_ax,
+                "",
+                view["x_labels"],
+                view["network"]["upload_kb"],
+                view["network"]["download_kb"],
+                "上行 KB" if report_language(config) == "zh" else "Upload KB",
+                "下行 KB" if report_language(config) == "zh" else "Download KB",
+                "#F59E0B",
+                "#10B981",
+            ),
+            inset=(0.07, 0.16, 0.86, 0.62),
         )
         pdf.savefig(page_one, facecolor="#FFFFFF")
         plt.close(page_one)
 
         page_two = create_baota_daily_figure()
-        page_two.subplots_adjust(left=0.075, right=0.925, top=0.985, bottom=0.035, hspace=0.26, wspace=0.24)
-        grid_two = page_two.add_gridspec(4, 12, height_ratios=[0.68, 2.78, 2.58, 2.48])
+        page_two.subplots_adjust(left=0.060, right=0.940, top=0.985, bottom=0.042, hspace=0.24, wspace=0.18)
+        grid_two = page_two.add_gridspec(3, 12, height_ratios=[0.68, 2.78, 2.78])
         draw_baota_header_black(page_two.add_subplot(grid_two[0, :]), report, view, labels, generated_at, 2, total_pages)
-        draw_baota_dense_table_v2(
+        draw_enterprise_table_card(
             page_two.add_subplot(grid_two[1, :]),
-            labels["hot_pages"],
-            hot_page_headers,
-            view["hot_page_rows"][:10],
-            [0.56, 0.09, 0.09, 0.12, 0.14],
-            title_font_size=16.0,
-            font_size=8.5,
-            header_font_size=8.8,
-            row_height=0.067,
-            bbox_height=0.95,
-            wrap_widths={0: 56},
-            alignments={0: "left", 1: "center", 2: "center", 3: "center", 4: "center"},
-            header_facecolor="#E9F1FF",
-            edgecolor="#D5DEE8",
+            locale_text(config, "热门页面 URI", "Top URI Insights"),
+            [labels["rank"], labels["url_path"], labels["request_volume"], labels["traffic_volume"]],
+            build_traffic_uri_card_rows(view),
+            [0.08, 0.64, 0.12, 0.16],
+            subtitle=locale_text(config, "长 URI 已自动截断，按请求量排序", "Long URIs are safely truncated and sorted by requests"),
+            alignments={0: "center", 1: "left", 2: "center", 3: "center"},
+            truncate_rules={1: {"limit": 40, "strip_query": True}},
+            empty_label=labels["no_data"],
         )
-        draw_baota_dense_table_v2(
+        draw_enterprise_table_card(
             page_two.add_subplot(grid_two[2, :]),
-            labels["hot_ips"],
-            [labels["ip_address"], labels["request_volume"], labels["traffic_volume"], labels["info"]],
-            view["hot_ip_rows"][:10],
-            [0.29, 0.22, 0.15, 0.34],
-            title_font_size=16.0,
-            font_size=8.5,
-            header_font_size=8.8,
-            row_height=0.067,
-            bbox_height=0.95,
-            alignments={0: "left", 1: "center", 2: "center", 3: "left"},
-            header_facecolor="#E9F1FF",
-            edgecolor="#D5DEE8",
-        )
-        draw_baota_dense_table_v2(
-            page_two.add_subplot(grid_two[3, :]),
-            labels["hot_referers"],
-            hot_referer_headers,
-            view["hot_referer_rows"][:10],
-            [0.56, 0.11, 0.14, 0.19],
-            title_font_size=16.0,
-            font_size=8.5,
-            header_font_size=8.8,
-            row_height=0.074,
-            bbox_height=0.95,
-            wrap_widths={0: 44},
-            alignments={0: "left", 1: "center", 2: "center", 3: "center"},
-            header_facecolor="#E9F1FF",
-            edgecolor="#D5DEE8",
+            locale_text(config, "热门访问 IP", "Top IP Insights"),
+            [labels["rank"], labels["ip_address"], labels["request_volume"], labels["traffic_volume"]],
+            build_traffic_ip_card_rows(view),
+            [0.08, 0.56, 0.16, 0.20],
+            subtitle=locale_text(config, "聚焦高频访问来源，便于快速识别异常流量", "Focus on the highest-frequency visitor IPs"),
+            alignments={0: "center", 1: "left", 2: "center", 3: "center"},
+            empty_label=labels["no_data"],
         )
         pdf.savefig(page_two, facecolor="#FFFFFF")
         plt.close(page_two)
 
-        page_three = create_baota_daily_figure()
-        page_three.subplots_adjust(left=0.075, right=0.925, top=0.985, bottom=0.04, hspace=0.38, wspace=0.34)
-        grid_three = page_three.add_gridspec(3, 12, height_ratios=[0.68, 2.25, 3.20])
-        draw_baota_header_black(page_three.add_subplot(grid_three[0, :]), report, view, labels, generated_at, 3, total_pages)
-        draw_baota_donut_stats_v2(
-            page_three.add_subplot(grid_three[1, 0:6]),
-            labels["spider_distribution"],
-            view["spider_distribution"],
-            ["#2563EB", "#10B981", "#F59E0B", "#8B5CF6", "#94A3B8", "#06B6D4", "#CBD5E1"],
-            labels,
-        )
-        draw_baota_donut_stats_v2(
-            page_three.add_subplot(grid_three[1, 6:12]),
-            labels["http_status_mix"],
-            view["status_distribution"],
-            ["#22C55E", "#06B6D4", "#F59E0B", "#FB7185", "#EF4444", "#A855F7", "#64748B", "#CBD5E1"],
-            labels,
-        )
-        draw_baota_hot_table_v2(
-            page_three.add_subplot(grid_three[2, 0:6]),
-            dynamic_top_title(labels["crawler_top10"], len(spider_top_rows)),
-            [labels["rank"], labels["item"], labels["request_volume"], labels["share"]],
-            spider_top_rows or fallback_table_rows(4, config),
-            [0.12, 0.44, 0.22, 0.22],
-            font_size=7.8,
-            header_font_size=8.4,
-            row_height=0.090,
-            bbox_height=0.95,
-            alignments={0: "center", 1: "left", 2: "center", 3: "center"},
-        )
-        draw_baota_hot_table_v2(
-            page_three.add_subplot(grid_three[2, 6:12]),
-            dynamic_top_title(labels["status_detail_top10"], len(status_top_rows)),
-            [labels["rank"], labels["status_code"], labels["request_volume"], labels["share"]],
-            status_top_rows or fallback_table_rows(4, config),
-            [0.12, 0.32, 0.28, 0.28],
-            font_size=7.8,
-            header_font_size=8.4,
-            row_height=0.090,
-            bbox_height=0.95,
-            alignments={0: "center", 1: "left", 2: "center", 3: "center"},
-        )
-        pdf.savefig(page_three, facecolor="#FFFFFF")
-        plt.close(page_three)
+        if not split_security_pages:
+            draw_daily_spider_status_page(
+                pdf,
+                report,
+                config,
+                view,
+                labels,
+                generated_at,
+                total_pages,
+                spider_chart_distribution,
+                status_chart_distribution,
+                spider_top_rows,
+                status_top_rows,
+            )
+        else:
+            page_three = create_baota_daily_figure()
+            page_three.subplots_adjust(left=0.055, right=0.945, top=0.985, bottom=0.040, hspace=0.20, wspace=0.16)
+            grid_three = page_three.add_gridspec(3, 12, height_ratios=[0.68, 2.28, 3.10])
+            draw_baota_header_black(page_three.add_subplot(grid_three[0, :]), report, view, labels, generated_at, 3, total_pages)
+            spider_cards = grid_three[1, :].subgridspec(1, 2, wspace=0.16)
+            draw_enterprise_donut_card(
+                page_three.add_subplot(spider_cards[0, 0]),
+                locale_text(config, "蜘蛛抓取占比", "Crawler Mix"),
+                spider_chart_distribution,
+                ENTERPRISE_DONUT_COLORS,
+                labels,
+                locale_text(config, "抓取次数", "Crawls"),
+            )
+            draw_enterprise_metrics_card(
+                page_three.add_subplot(spider_cards[0, 1]),
+                locale_text(config, "蜘蛛抓取摘要", "Spider Shield"),
+                build_spider_metrics(report, config, labels),
+            )
+            draw_enterprise_table_card(
+                page_three.add_subplot(grid_three[2, :]),
+                dynamic_top_title(labels["crawler_top10"], len(spider_top_rows)),
+                [labels["rank"], labels["item"], labels["request_volume"], labels["share"]],
+                spider_top_rows or fallback_table_rows(4, config),
+                [0.10, 0.48, 0.18, 0.24],
+                subtitle=locale_text(config, "按抓取量排序的蜘蛛家族详情", "Spider family details ranked by crawl volume"),
+                alignments={0: "center", 1: "left", 2: "center", 3: "center"},
+                empty_label=labels["no_data"],
+            )
+            pdf.savefig(page_three, facecolor="#FFFFFF")
+            plt.close(page_three)
 
-        page_four = create_baota_daily_figure()
-        page_four.subplots_adjust(left=0.070, right=0.930, top=0.985, bottom=0.032, hspace=0.40, wspace=0.30)
-        grid_four = page_four.add_gridspec(3, 12, height_ratios=[0.68, 2.35, 3.12])
-        draw_baota_header_black(page_four.add_subplot(grid_four[0, :]), report, view, labels, generated_at, 4, total_pages)
-        draw_baota_province_distribution_v3(page_four.add_subplot(grid_four[1, 0:6]), view, labels)
-        draw_baota_donut_stats_v2(
-            page_four.add_subplot(grid_four[1, 6:12]),
-            labels["client_distribution"],
-            client_chart_distribution,
-            ["#2563EB", "#10B981", "#F59E0B", "#8B5CF6", "#94A3B8", "#06B6D4", "#F97316", "#CBD5E1"],
-            labels,
-        )
-        draw_baota_dense_table_v2(
-            page_four.add_subplot(grid_four[2, 0:6]),
-            dynamic_top_title(labels["province_top10"], len(province_table_rows)),
-            [labels["province"], labels["ips"], labels["request_volume"]],
-            province_table_rows,
-            [0.44, 0.22, 0.34],
-            title_font_size=14.0,
-            font_size=8.6,
-            header_font_size=8.8,
-            row_height=0.074,
-            bbox_height=0.90,
-            alignments={0: "left", 1: "center", 2: "center"},
-            header_facecolor="#E9F1FF",
-            edgecolor="#D5DEE8",
-        )
-        draw_baota_dense_table_v2(
-            page_four.add_subplot(grid_four[2, 6:12]),
-            dynamic_top_title(labels["client_top10"], len(client_table_rows)),
-            [labels["client"], labels["visit_volume"], labels["share"]],
-            client_table_rows,
-            [0.44, 0.28, 0.28],
-            title_font_size=14.0,
-            font_size=8.6,
-            header_font_size=8.8,
-            row_height=0.074,
-            bbox_height=0.90,
-            alignments={0: "left", 1: "center", 2: "center"},
-            header_facecolor="#E9F1FF",
-            edgecolor="#D5DEE8",
-        )
-        pdf.savefig(page_four, facecolor="#FFFFFF")
-        plt.close(page_four)
+            page_four = create_baota_daily_figure()
+            page_four.subplots_adjust(left=0.055, right=0.945, top=0.985, bottom=0.040, hspace=0.20, wspace=0.16)
+            grid_four = page_four.add_gridspec(3, 12, height_ratios=[0.68, 2.28, 3.10])
+            draw_baota_header_black(page_four.add_subplot(grid_four[0, :]), report, view, labels, generated_at, 4, total_pages)
+            status_cards = grid_four[1, :].subgridspec(1, 2, wspace=0.16)
+            draw_enterprise_donut_card(
+                page_four.add_subplot(status_cards[0, 0]),
+                locale_text(config, "状态码占比", "Status Mix"),
+                status_chart_distribution,
+                ["#4E79A7", "#59A14F", "#F28E2B", "#E15759", "#76B7B2", "#EDC948"],
+                labels,
+                locale_text(config, "请求总量", "Requests"),
+            )
+            draw_enterprise_metrics_card(
+                page_four.add_subplot(status_cards[0, 1]),
+                locale_text(config, "错误状态摘要", "Status Summary"),
+                build_status_metrics(report, config),
+            )
+            draw_enterprise_table_card(
+                page_four.add_subplot(grid_four[2, :]),
+                dynamic_top_title(labels["status_detail_top10"], len(status_top_rows)),
+                [labels["rank"], labels["status_code"], labels["request_volume"], labels["share"]],
+                status_top_rows or fallback_table_rows(4, config),
+                [0.10, 0.30, 0.28, 0.32],
+                subtitle=locale_text(config, "保留 Top 10 状态码详情，便于横向比对", "Top 10 status details for quick comparison"),
+                alignments={0: "center", 1: "left", 2: "center", 3: "center"},
+                empty_label=labels["no_data"],
+            )
+            pdf.savefig(page_four, facecolor="#FFFFFF")
+            plt.close(page_four)
+
+        if not split_security_pages:
+            page_four = create_baota_daily_figure()
+            page_four.subplots_adjust(left=0.055, right=0.945, top=0.985, bottom=0.040, hspace=0.22, wspace=0.16)
+            grid_four = page_four.add_gridspec(3, 12, height_ratios=[0.68, 2.16, 2.72])
+            draw_baota_header_black(page_four.add_subplot(grid_four[0, :]), report, view, labels, generated_at, 4, total_pages)
+            top_grid = grid_four[1, :].subgridspec(1, 2, wspace=0.16)
+            draw_enterprise_chart_card(
+                page_four.add_subplot(top_grid[0, 0]),
+                labels["province_access_distribution"],
+                lambda inner_ax: draw_compact_province_chart(inner_ax, view, labels),
+                subtitle=locale_text(config, "聚焦主要区域与活跃 IP 的集中度", "Focus on the strongest regions and active IP density"),
+            )
+            draw_enterprise_donut_card(
+                page_four.add_subplot(top_grid[0, 1]),
+                labels["client_distribution"],
+                client_chart_distribution,
+                ENTERPRISE_DONUT_COLORS,
+                labels,
+                locale_text(config, "访问量", "Visits"),
+            )
+            bottom_grid = grid_four[2, :].subgridspec(1, 2, wspace=0.16)
+            draw_enterprise_table_card(
+                page_four.add_subplot(bottom_grid[0, 0]),
+                dynamic_top_title(labels["province_top10"], len(province_table_rows)),
+                [labels["province"], labels["ips"], labels["request_volume"]],
+                province_table_rows,
+                [0.44, 0.22, 0.34],
+                alignments={0: "left", 1: "center", 2: "center"},
+                empty_label=labels["no_data"],
+            )
+            draw_enterprise_table_card(
+                page_four.add_subplot(bottom_grid[0, 1]),
+                dynamic_top_title(labels["client_top10"], len(client_table_rows)),
+                [labels["client"], labels["visit_volume"], labels["share"]],
+                client_table_rows,
+                [0.44, 0.28, 0.28],
+                alignments={0: "left", 1: "center", 2: "center"},
+                empty_label=labels["no_data"],
+            )
+            pdf.savefig(page_four, facecolor="#FFFFFF")
+            plt.close(page_four)
+        else:
+            draw_period_province_page(
+                pdf,
+                report,
+                config,
+                view,
+                labels,
+                generated_at,
+                5,
+                total_pages,
+                province_table_rows,
+            )
+            draw_period_client_page(
+                pdf,
+                report,
+                config,
+                view,
+                labels,
+                generated_at,
+                6,
+                total_pages,
+                client_chart_distribution,
+                client_table_rows,
+            )
 
     return output_path
 

@@ -1,6 +1,6 @@
 # Server-Mate User Guide
 
-Version: `1.3.0`
+Version: `1.3.1`
 
 ## 1. What This Guide Covers
 
@@ -9,6 +9,7 @@ This guide is for operators who want to deploy `Server-Mate` on CentOS, Ubuntu, 
 It covers:
 
 - Python and system dependencies
+- GeoIP / MaxMind provisioning for province-level reports
 - multi-site `config.yaml` setup
 - SSH brute-force monitoring and SSL expiry checks
 - Daily / weekly / monthly report generation
@@ -46,6 +47,17 @@ Optional but recommended:
 
 ```bash
 python3 -m pip install geoip2
+```
+
+- Install `geoipupdate` if you want to refresh GeoLite2 databases from MaxMind with your own account:
+
+```bash
+# CentOS / Rocky / AlmaLinux
+sudo yum install geoipupdate
+
+# Ubuntu / Debian
+sudo apt-get update
+sudo apt-get install geoipupdate
 ```
 
 ### 2.2 Linux Fonts for Chinese PDF Rendering
@@ -90,6 +102,33 @@ Typical examples:
 - Custom layout:
   - `/path/to/logs/site-a.access.log`
   - `/path/to/logs/site-a.error.log`
+
+### 2.4 GeoIP / MaxMind Setup
+
+Server-Mate 1.3.1 supports two GeoIP provisioning modes:
+
+- Official MaxMind mode
+  - Put your MaxMind `GeoIP.conf` at `./data/GeoIP.conf`.
+  - Keep it out of Git. This file contains your `AccountID` and `LicenseKey`.
+  - If `geoipupdate` is installed, the report generator will try this path first when `geoip_city_db` is missing.
+- Public mirror fallback
+  - If `geoipupdate` is not installed or `./data/GeoIP.conf` is absent, Server-Mate falls back to the built-in public `.mmdb` mirror download.
+
+Recommended workflow:
+
+1. Register a free MaxMind GeoLite2 account.
+   - Sign-up page: [GeoLite sign up](https://www.maxmind.com/en/geolite2/signup)
+2. Create a GeoLite2 license key in the MaxMind account portal.
+   - License key guide: [Generate a License Key](https://support.maxmind.com/hc/en-us/articles/4407111582235-Generate-a-License-Key)
+3. Copy [`data/GeoIP.conf.example`](data/GeoIP.conf.example) to `./data/GeoIP.conf`.
+4. Fill in your real `AccountID` and `LicenseKey`.
+5. Keep `notifications.reports.geoip_city_db` pointing at `./data/GeoLite2-City.mmdb`.
+
+Important:
+
+- Do not commit `./data/GeoIP.conf` to GitHub.
+- Do not paste real MaxMind credentials into `config.example.yaml`.
+- If a key has already been shared in plaintext, rotate it in MaxMind before production use.
 
 ## 3. Configuration Overview
 
@@ -151,6 +190,7 @@ notifications:
     report_export_dir: ./public/reports
     public_base_url: https://ops.example.com/reports
     geoip_city_db: ./data/GeoLite2-City.mmdb
+    geoip_update_config: ./data/GeoIP.conf
     ai_analysis:
       enabled: true
       simulate: false
@@ -308,7 +348,11 @@ Global report options:
   - Optional URL prefix used to build direct download links.
 - `geoip_city_db`
   - Optional GeoIP City database path. When configured with `geoip2`, province-distribution charts use real IP geolocation. If omitted, Server-Mate falls back to `Unknown Region` / `未知地区`.
-  - If the configured file is missing, the report generator can auto-download the `.mmdb` file from a public mirror before rendering.
+  - If the configured file is missing, the report generator first tries `geoipupdate` with `geoip_update_config`, then falls back to a public mirror download.
+- `geoip_update_config`
+  - Optional path to MaxMind `GeoIP.conf`.
+  - Recommended value: `./data/GeoIP.conf`.
+  - Use this when you want Server-Mate to refresh GeoLite2 databases from your own MaxMind account instead of relying only on the public mirror.
   - Report generation also checks the configured site certificate and surfaces SSL remaining days in PDF headers and webhook summaries.
 
 Per-schedule options:
@@ -471,16 +515,16 @@ Rules to follow:
 
 ## 7. Generating Reports Manually
 
-### 7.1 Daily Markdown
+### 7.1 Daily Markdown Snapshot
 
 ```bash
 python3 scripts/report_generator.py --config config.yaml daily --date 2026-03-26 --json
 ```
 
-### 7.2 Daily Markdown + Webhook Push
+### 7.2 Daily PDF + Webhook Push
 
 ```bash
-python3 scripts/report_generator.py --config config.yaml daily --date 2026-03-26 --send
+python3 scripts/report_generator.py --config config.yaml pdf --range daily --end-date 2026-03-26 --send
 ```
 
 ### 7.3 Weekly PDF
@@ -506,8 +550,9 @@ All three PDF modes now reuse the same final SaaS report layout:
 This is the recommended production pattern:
 
 - Run the collector in `--once` mode every 10 minutes.
-- Run report generation as one-shot jobs.
+- Run report generation as one-shot PDF jobs.
 - Let cron or systemd control timing instead of embedding a complex scheduler into the report process.
+- For scheduled daily / weekly / monthly pushes, use `pdf --range ... --send` instead of the lightweight `daily --send` markdown mode.
 
 ### 8.1 Open crontab
 
@@ -544,12 +589,13 @@ In multi-site mode, this single cron entry will loop over every configured site 
 20 1 1 * * /usr/bin/env bash -lc 'cd /path/to/server-mate && python3 ./scripts/report_generator.py --config ./config.yaml pdf --range monthly --send >> ./logs/server-mate-report.log 2>&1'
 ```
 
-### 8.6 Optional Daily Markdown Instead of PDF
+### 8.6 Manual Markdown Snapshot (Debug Only)
 
-If you prefer a lighter daily push:
+If you need the lightweight Markdown mode for debugging, run it manually instead of wiring it into cron/systemd report tasks:
 
-```cron
-0 1 * * * /usr/bin/env bash -lc 'cd /path/to/server-mate && python3 ./scripts/report_generator.py --config ./config.yaml daily --send >> ./logs/server-mate-report.log 2>&1'
+```bash
+cd /path/to/server-mate
+python3 ./scripts/report_generator.py --config ./config.yaml daily --date 2026-03-26 --send
 ```
 
 ### 8.7 Recommended Log Files
@@ -794,3 +840,4 @@ sqlite3 ./metrics.db "SELECT site, ip_address, created_at, expires_at, lifted_at
 - Enable AI diagnosis for complex `error_event` alerts
 - Add GeoIP enrichment for country / region reports
 - Add signed or expiring report download URLs if the report host is public
+
