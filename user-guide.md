@@ -46,7 +46,7 @@ Optional but recommended:
 - Install `geoip2` if you want real province distribution in PDF reports:
 
 ```bash
-python3 -m pip install geoip2
+python3 -m pip install geoip2 maxminddb aiohttp
 ```
 
 - Install `geoipupdate` if you want to refresh GeoLite2 databases from MaxMind with your own account:

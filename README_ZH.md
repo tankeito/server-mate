@@ -125,7 +125,7 @@ cd server-mate
 python3 -m pip install psutil pyyaml matplotlib
 
 # 可选：启用 GeoIP 能力
-python3 -m pip install geoip2
+python3 -m pip install geoip2 maxminddb aiohttp
 
 # 可选：安装官方 MaxMind 更新器
 # CentOS / Rocky / AlmaLinux: sudo yum install geoipupdate
@@ -205,6 +205,7 @@ automation:
 
 - 将你的 MaxMind 配置文件放在 `./data/GeoIP.conf`
 - 请手动创建 `./data/GeoIP.conf`，真实文件不要提交到 Git
+- 若希望报表中展示真实地区，请安装 `geoip2` 及其依赖，例如 `maxminddb`、`aiohttp`
 - 免费 GeoLite2 账号注册地址：[MaxMind GeoLite 注册](https://www.maxmind.com/en/geolite2/signup)
 - License Key 生成说明：[Generate a License Key](https://support.maxmind.com/hc/en-us/articles/4407111582235-Generate-a-License-Key)
 - `geoip_update_config` 是可选项，但推荐本地统一使用 `./data/GeoIP.conf`
@@ -392,7 +393,7 @@ crontab -e
 
 **内容包含**：
 - 前 24 小时的 PV、UV、IP 汇总
-- 热门页面、热门 IP、热门来源
+- 带浏览量(PV) / 访问数(UV) 的热门页面、带地区的热门 IP、热门来源
 - 蜘蛛流量分布
 - 状态码分布（2xx / 3xx / 4xx / 5xx）
 - Top 错误和慢响应端点

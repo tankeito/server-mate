@@ -483,6 +483,22 @@ TRANSLATIONS["en"].update(
     }
 )
 
+TRANSLATIONS["zh"].update(
+    {
+        "pageviews_pv": "浏览量(PV)",
+        "visitors_uv": "访问数(UV)",
+        "region": "地区",
+    }
+)
+
+TRANSLATIONS["en"].update(
+    {
+        "pageviews_pv": "Pageviews (PV)",
+        "visitors_uv": "Visitors (UV)",
+        "region": "Region",
+    }
+)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -1111,6 +1127,7 @@ def enrich_ip_rows_with_geo(
                 "item": ip_address,
                 "request_count": int(row.get("request_count") or row.get("count") or 0),
                 "bytes_out": int(row.get("bytes_out") or 0),
+                "region": region,
                 "info": info,
             }
         )
@@ -6666,6 +6683,7 @@ def build_hot_ip_rows_from_report(report: dict[str, Any], config: dict[str, Any]
                 str(row.get("item") or "-"),
                 format_number(int(row.get("request_count") or row.get("count") or 0)),
                 format_bytes(int(row.get("bytes_out") or 0)) if int(row.get("bytes_out") or 0) > 0 else "-",
+                str(row.get("region") or localized_unknown_region(config)),
                 str(row.get("info") or localized_unknown_info(config)),
             ]
         )
@@ -6677,10 +6695,11 @@ def build_hot_ip_rows_from_report(report: dict[str, Any], config: dict[str, Any]
                 str(row.get("item") or "-"),
                 format_number(int(row.get("count") or 0)),
                 "-",
+                localized_unknown_region(config),
                 localized_unknown_info(config),
             ]
         )
-    return rows or fallback_table_rows(4, config)
+    return rows or fallback_table_rows(5, config)
 
 
 def build_province_payload_from_report(report: dict[str, Any], config: dict[str, Any]) -> tuple[list[list[str]], list[str], list[int], list[int]]:
@@ -7216,14 +7235,14 @@ def build_traffic_uri_card_rows(view: dict[str, Any]) -> list[list[str]]:
     rows: list[list[str]] = []
     for index, row in enumerate((view.get("hot_page_rows") or [])[:10], start=1):
         path = sanitize_long_table_text(str(row[0]), limit=40, strip_query=True)
-        rows.append([str(index), path, str(row[3]), str(row[4])])
+        rows.append([str(index), path, str(row[1]), str(row[2]), str(row[3]), str(row[4])])
     return rows
 
 
 def build_traffic_ip_card_rows(view: dict[str, Any]) -> list[list[str]]:
     rows: list[list[str]] = []
     for index, row in enumerate((view.get("hot_ip_rows") or [])[:10], start=1):
-        rows.append([str(index), str(row[0]), str(row[1]), str(row[2])])
+        rows.append([str(index), str(row[0]), str(row[1]), str(row[2]), str(row[3])])
     return rows
 
 
@@ -7721,22 +7740,22 @@ def render_dashboard_pdf(
         draw_enterprise_table_card(
             page_two.add_subplot(grid_two[1, :]),
             locale_text(config, "热门页面 URI", "Top URI Insights"),
-            [labels["rank"], labels["url_path"], labels["request_volume"], labels["traffic_volume"]],
+            [labels["rank"], labels["url_path"], labels["pageviews_pv"], labels["visitors_uv"], labels["request_volume"], labels["traffic_volume"]],
             build_traffic_uri_card_rows(view),
-            [0.08, 0.64, 0.12, 0.16],
+            [0.06, 0.46, 0.12, 0.12, 0.10, 0.14],
             subtitle=locale_text(config, "长 URI 已自动截断，按请求量排序", "Long URIs are safely truncated and sorted by requests"),
-            alignments={0: "center", 1: "left", 2: "center", 3: "center"},
+            alignments={0: "center", 1: "left", 2: "center", 3: "center", 4: "center", 5: "center"},
             truncate_rules={1: {"limit": 40, "strip_query": True}},
             empty_label=labels["no_data"],
         )
         draw_enterprise_table_card(
             page_two.add_subplot(grid_two[2, :]),
             locale_text(config, "热门访问 IP", "Top IP Insights"),
-            [labels["rank"], labels["ip_address"], labels["request_volume"], labels["traffic_volume"]],
+            [labels["rank"], labels["ip_address"], labels["request_volume"], labels["traffic_volume"], labels["region"]],
             build_traffic_ip_card_rows(view),
-            [0.08, 0.56, 0.16, 0.20],
+            [0.08, 0.26, 0.14, 0.16, 0.36],
             subtitle=locale_text(config, "聚焦高频访问来源，便于快速识别异常流量", "Focus on the highest-frequency visitor IPs"),
-            alignments={0: "center", 1: "left", 2: "center", 3: "center"},
+            alignments={0: "center", 1: "left", 2: "center", 3: "center", 4: "left"},
             empty_label=labels["no_data"],
         )
         pdf.savefig(page_two, facecolor="#FFFFFF")

@@ -125,7 +125,7 @@ cd server-mate
 python3 -m pip install psutil pyyaml matplotlib
 
 # Optional: GeoIP support
-python3 -m pip install geoip2
+python3 -m pip install geoip2 maxminddb aiohttp
 
 # Optional: official MaxMind updater
 # CentOS / Rocky / AlmaLinux: sudo yum install geoipupdate
@@ -205,6 +205,7 @@ automation:
 
 - Put your MaxMind config at `./data/GeoIP.conf`
 - Create `./data/GeoIP.conf` manually and keep the real file out of Git
+- Install `geoip2` and its supporting packages such as `maxminddb` and `aiohttp` if you want real region lookups in reports
 - Free GeoLite2 account: [MaxMind GeoLite sign up](https://www.maxmind.com/en/geolite2/signup)
 - License key guide: [Generate a License Key](https://support.maxmind.com/hc/en-us/articles/4407111582235-Generate-a-License-Key)
 - `geoip_update_config` is optional, but `./data/GeoIP.conf` is the recommended local path
@@ -392,7 +393,7 @@ Add these lines:
 
 **Contents**:
 - PV, UV, and IP totals for the prior 24 hours
-- Top pages, top IPs, and top referers
+- Top pages with PV/UV columns, top IPs with region, and top referers
 - Spider traffic breakdown
 - Status-code distribution (`2xx`, `3xx`, `4xx`, `5xx`)
 - Top errors and slow endpoints
