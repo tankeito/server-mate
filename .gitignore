@@ -15,9 +15,8 @@ server_agent_state.json
 # Generated reports and exports
 reports/
 exports/
+data/
 public-reports/
-data/*.mmdb
-data/GeoIP.conf
 
 # Runtime logs and temp files
 *.log
