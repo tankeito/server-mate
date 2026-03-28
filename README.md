@@ -1,8 +1,8 @@
-English | [荳ｭ譁Ⅹ(README_ZH.md)
+English | [Chinese](README_ZH.md)
 
 ---
 
-# 箕・・Server-Mate | Lightweight Server Monitoring & AI Ops
+# Server-Mate | Lightweight Server Monitoring and AI Ops
 
 > A two-plane monitoring system for Linux hosts running Nginx or Apache.
 
@@ -15,68 +15,68 @@ English | [荳ｭ譁Ⅹ(README_ZH.md)
 
 ---
 
-## 当 Overview
+## Overview
 
-**Server-Mate** is a lightweight server monitoring and AI operations workflow designed for Linux hosts running Nginx or Apache.
+**Server-Mate** is a lightweight server monitoring and AI operations workflow for Linux web hosts running Nginx or Apache.
 
 It splits responsibilities into two planes:
-- **Server Agent**: Python collector that tails logs and samples host metrics via `psutil`
-- **AI Analyzer**: OpenClaw-side aggregator that explains failures, answers questions, and sends alerts
+- **Server Agent**: a Python collector that tails logs, samples host metrics, and writes SQLite rollups
+- **AI Analyzer**: an OpenClaw-side layer that generates reports, pushes webhooks, explains issues, and drives guarded automation
 
-### 笨ｨ Key Features
+### Key Features
 
-- 投 **Real-Time Metrics**: CPU, memory, disk, load, network I/O via `psutil`
-- 統 **Log Parsing**: Nginx/Apache access and error log normalization
-- 嶋 **Traffic Analysis**: PV, UV, IP counts, QPS, bandwidth, status breakdown
-- 聞・・**Spider Detection**: Crawler family identification and traffic separation
-- 笞・・**Smart Alerts**: Threshold-based webhooks (DingTalk, WeCom, Feishu, Telegram)
-- 孱・・**SSH Security Shield**: auth log brute-force detection linked with Guarded Automation auto-ban
-- ､・**AI Diagnosis**: Natural-language error explanations and remediation guidance
-- 塘 **Auto Reports**: Daily/Weekly/Monthly PDF reports with AI commentary
-- 白 **SSL Expiry Checks**: certificate remaining-days inspection in PDF headers and webhook summaries
-- 白 **Guarded Automation**: Optional auto-ban and auto-heal with cooldowns and audit logs
+- **Real-time metrics**: CPU, memory, disk, load, and network I/O via `psutil`
+- **Log parsing**: normalized Nginx and Apache access/error log processing
+- **Traffic analytics**: PV, UV, IP count, QPS, bandwidth, and status-code breakdowns
+- **Spider detection**: crawler-family recognition and traffic separation
+- **Smart alerts**: DingTalk, WeCom, Feishu, and Telegram webhook delivery
+- **SSH Security Shield**: auth-log brute-force detection linked to auto-ban
+- **AI diagnosis**: plain-language explanations and remediation guidance
+- **Auto reports**: daily, weekly, and monthly PDF reports with AI commentary
+- **SSL expiry checks**: certificate remaining days in PDF summaries and webhook messages
+- **Guarded Automation**: optional auto-ban and auto-heal with cooldowns, allowlists, and audit logs
 
-### 識 Use Cases
+### Use Cases
 
-- Monitor Linux servers without replacing existing stack
-- Get AI-powered error explanations instead of raw log dumps
-- Automated daily/weekly ops reports with traffic trends and security insights
-- Detect suspicious IPs, 404 scan bursts, and 5xx error spikes
-- Safe auto-remediation with allowlists, TTLs, and audit trails
+- Add observability to Linux hosts without replacing your current stack
+- Get AI-powered explanations instead of reading raw logs line by line
+- Generate daily, weekly, and monthly ops reports automatically
+- Detect suspicious IPs, 404 scans, 5xx spikes, and SSH brute-force attempts
+- Enable safe automation with allowlists, TTLs, cooldowns, and audit trails
 
 ---
 
-## ・ What's New in v1.3.1
+## What's New in v1.3.1
 
 ### SSH Security Shield
 
-- **Auth Log Parsing**: incrementally parses `logs.auth_log` (or auto-detects `/var/log/auth.log` / `/var/log/secure`) for `Failed password` fingerprints
-- **Linked Auto-Ban**: repeated SSH failures now raise `ssh_brute_force` alerts and can flow into the existing whitelist-aware auto-ban pipeline
+- **Auth log parsing**: incrementally parses `logs.auth_log`, or auto-detects `/var/log/auth.log` and `/var/log/secure`, for `Failed password` fingerprints
+- **Linked auto-ban**: repeated SSH failures raise `ssh_brute_force` alerts and can flow into the existing whitelist-aware auto-ban pipeline
 
 ### SSL Expiry Checker
 
-- **Certificate Inspection**: report generation now checks each configured site certificate with Python `ssl` and `socket`
-- **Visible Everywhere**: remaining days appear in PDF overview blocks and webhook markdown summaries, with warning markers below 15 days
+- **Certificate inspection**: report generation now checks each configured site certificate with Python `ssl` and `socket`
+- **Visible everywhere**: remaining days appear in PDF overview blocks and webhook markdown summaries, with warning markers below 15 days
 
 ### PDF Overflow Guard
 
-- **URL / Referer Truncation**: query strings are removed before table rendering, then long text is hard-truncated
-- **Stable Table Layouts**: oversized tokens no longer break dense PDF pages
+- **URL / Referer truncation**: query strings are removed before table rendering, then long text is hard-truncated
+- **Stable table layouts**: oversized tokens no longer break dense PDF pages
 
 ### Telegram Push
 
-- **New Channel**: webhook center now supports Telegram bot delivery
-- **Env Fallback**: `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are used when config values are empty
+- **New channel**: the webhook center now supports Telegram bot delivery
+- **Environment fallback**: `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are used when config values are empty
 
 ### Out-of-the-box GeoIP
 
-- **Auto-Provisioning**: The report generator now automatically downloads the required GeoLite2 `.mmdb` database from a public mirror if it's missing, delivering zero-config IP geolocation.
-- **MaxMind-First Workflow**: if `./data/GeoIP.conf` exists and `geoipupdate` is installed, Server-Mate now refreshes GeoLite2 from your own MaxMind account before falling back to the public mirror.
+- **Auto-provisioning**: the report generator automatically downloads the required GeoLite2 `.mmdb` database from a public mirror if it is missing
+- **MaxMind-first workflow**: if `./data/GeoIP.conf` exists and `geoipupdate` is installed, Server-Mate refreshes GeoLite2 from your own MaxMind account before falling back to the public mirror
 
 ### AI Alert Diagnosis
 
-- **Pre-Send AI Review**: warning and critical alerts can call the shared AI endpoint before webhook delivery
-- **Two-Sentence Output**: alert cards append a compact `庁 AI 譎ｺ閭ｽ隸頑妙` block with plain-language cause and next action
+- **Pre-send AI review**: warning and critical alerts can call the shared AI endpoint before webhook delivery
+- **Two-sentence output**: alert cards append a compact `AI Diagnosis` block with plain-language cause and next action
 
 ### systemd Template
 
@@ -84,35 +84,35 @@ It splits responsibilities into two planes:
 
 ### Multi-Site Monitoring
 
-- **Matrix Configuration**: Monitor multiple domains on the same host with `sites[]` array
-- **System Metrics**: Dedicated `system_metrics` section for host-global resources (CPU, memory, disk, network)
-- **Scope Separation**: Host-global metrics separated from site-local traffic rollups via `__host__` scope
+- **Matrix configuration**: monitor multiple domains on the same host with a `sites[]` array
+- **System metrics**: dedicated `system_metrics` settings for host-global resources
+- **Scope separation**: host-global metrics are separated from site-local traffic rollups via `__host__`
 
 ### Hardened Log Reading
 
-- **Logrotate Support**: Handles inode changes, file truncation, and temporary file absence
-- **Incremental Reading**: Robust state tracking across log rotations and restarts
+- **Logrotate support**: handles inode changes, file truncation, and temporary file absence
+- **Incremental reading**: robust state tracking across log rotations and restarts
 
 ### Guarded Automation
 
-- **Dry-Run Mode**: Test automation policies before enabling real actions
-- **Whitelist-Aware Auto-Ban**: Protects trusted IPs and known spiders (Googlebot, Bingbot, Baiduspider)
-- **TTL-Based Unban**: Automatic unban after configurable TTL (default: 24 hours)
-- **Cooldown Protection**: Prevents action storms with per-rule cooldowns
-- **Mandatory Notifications**: All automation actions logged and notified
+- **Dry-run mode**: test automation policies before enabling real actions
+- **Whitelist-aware auto-ban**: protects trusted IPs and known spiders
+- **TTL-based unban**: automatic unban after configurable TTL
+- **Cooldown protection**: prevents action storms with per-rule cooldowns
+- **Mandatory notifications**: all automation actions are logged and notified
 
 ### SQLite Audit Tracking
 
-- **`automation_actions` Table**: Complete audit trail of all automation events
-- **`banned_ips` Table**: Track active bans with TTL and metadata
+- **`automation_actions` table**: complete audit trail of automation events
+- **`banned_ips` table**: tracks active bans with TTL and metadata
 
 ### Configuration
 
-- **`config.example.yaml`**: Recommended starting point for v1.3.1 with multi-site, Telegram, SSH auth monitoring, SSL checks, AI alert diagnosis, and Guarded Automation pre-configured
+- **`config.example.yaml`**: recommended starting point for v1.3.1 with multi-site, Telegram, SSH auth monitoring, SSL checks, AI diagnosis, and Guarded Automation pre-configured
 
 ---
 
-## 噫 Quick Start
+## Quick Start
 
 ### 1. Installation
 
@@ -124,7 +124,7 @@ cd server-mate
 # Install dependencies
 python3 -m pip install psutil pyyaml matplotlib
 
-# Optional: GeoIP enrichment
+# Optional: GeoIP support
 python3 -m pip install geoip2
 
 # Optional: official MaxMind updater
@@ -134,27 +134,39 @@ python3 -m pip install geoip2
 
 ### 2. Configuration
 
-Generate or edit `config.yaml`:
+Start by copying [`config.example.yaml`](config.example.yaml) to `config.yaml`.
 
-For `1.3.1`, it is recommended to copy [`config.example.yaml`](config.example.yaml) to `config.yaml` first. In OpenClaw, keep `config.yaml`, `metrics.db`, `logs/`, and `reports/` inside the current workspace (`./`).
+In OpenClaw, keep `config.yaml`, `metrics.db`, `logs/`, and `reports/` inside the current workspace, meaning under `./`, instead of writing into global system directories.
+
+If AI features are enabled, OpenClaw injects `OPENAI_API_KEY` automatically, so you do not need to run `export OPENAI_API_KEY=...` manually.
 
 ```yaml
 agent:
   host_id: web-01
-  site: example.com
   timezone: Asia/Shanghai
   mode: once
 
+system_metrics:
+  enabled: true
+
 logs:
-  access_log: ./logs/access.log
-  error_log: ./logs/error.log
+  auth_log: ""
+
+sites:
+  - domain: site-a.example.com
+    site_host: site-a.example.com
+    enabled: true
+    access_log: ./logs/site-a.access.log
+    error_log: ./logs/site-a.error.log
+  - domain: site-b.example.com
+    site_host: site-b.example.com
+    enabled: true
+    access_log: ./logs/site-b.access.log
+    error_log: ./logs/site-b.error.log
 
 storage:
   database_file: ./metrics.db
   rollup_minutes: [10, 60]
-
-logs:
-  auth_log: ""
 
 notifications:
   webhooks:
@@ -171,29 +183,41 @@ notifications:
     public_base_url: ""
     geoip_city_db: ./data/GeoLite2-City.mmdb
     geoip_update_config: ./data/GeoIP.conf
+    ai_analysis:
+      enabled: true
+      simulate: false
+      api_key_env: OPENAI_API_KEY
     daily:
       enabled: true
       push_time: "08:30"
       channels: [dingtalk]
+      output_dir: ./reports
+
+automation:
+  dry_run: true
+  auto_ban:
+    enabled: false
+  auto_heal:
+    enabled: false
 ```
 
 ### 2.1 GeoIP Notes
 
-- Put your MaxMind config at `./data/GeoIP.conf`.
-- Start from [`data/GeoIP.conf.example`](data/GeoIP.conf.example) and keep the real file out of Git.
+- Put your MaxMind config at `./data/GeoIP.conf`
+- Start from [`data/GeoIP.conf.example`](data/GeoIP.conf.example) and keep the real file out of Git
 - Free GeoLite2 account: [MaxMind GeoLite sign up](https://www.maxmind.com/en/geolite2/signup)
 - License key guide: [Generate a License Key](https://support.maxmind.com/hc/en-us/articles/4407111582235-Generate-a-License-Key)
-- `geoip_update_config` is optional, but `./data/GeoIP.conf` is the recommended local path.
-- If you do not want to use MaxMind directly, Server-Mate still falls back to the public `.mmdb` mirror.
-- If a MaxMind key was ever exposed in plain text, rotate it before production use.
+- `geoip_update_config` is optional, but `./data/GeoIP.conf` is the recommended local path
+- If you do not want to use MaxMind directly, Server-Mate still falls back to the public `.mmdb` mirror
+- If a MaxMind key was ever exposed in plain text, rotate it before production use
 
-### 3. Run Agent (Manual Test)
+### 3. Run Agent Manually
 
 ```bash
 # One-shot collection
 python3 scripts/server_agent.py --config config.yaml --once
 
-# View collected metrics
+# View collected rollups
 python3 scripts/report_generator.py --config config.yaml daily --date 2026-03-26 --json
 ```
 
@@ -215,49 +239,49 @@ Add these lines:
 # Weekly PDF report every Monday at 01:10
 10 1 * * 1 /usr/bin/env bash -lc 'python3 ./scripts/report_generator.py --config ./config.yaml pdf --range weekly --send >> ./logs/server-mate-report.log 2>&1'
 
-# Monthly PDF report on 1st at 01:20
+# Monthly PDF report on the 1st at 01:20
 20 1 1 * * /usr/bin/env bash -lc 'python3 ./scripts/report_generator.py --config ./config.yaml pdf --range monthly --send >> ./logs/server-mate-report.log 2>&1'
 ```
 
 ---
 
-## 搭 Architecture
+## Architecture
 
 ### Two-Plane Design
 
-```
-笏娯楳笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏・
-笏・ Server Agent (CentOS Host)                                 笏・
-笏・ - psutil metrics (CPU, memory, disk, network)              笏・
-笏・ - Log tailer (Nginx/Apache access + error)                 笏・
-笏・ - JSON event emitter                                       笏・
-笏・ - SQLite rollup writer                                     笏・
-笏披楳笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏・
-                          笏・
-                          笏・SQLite / JSON events
-                          笆ｼ
-笏娯楳笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏・
-笏・ AI Analyzer (OpenClaw)                                     笏・
-笏・ - Aggregation & storage                                    笏・
-笏・ - Natural-language query handler                           笏・
-笏・ - AI error diagnosis                                       笏・
-笏・ - Webhook alerts (DingTalk, WeCom, Feishu, Telegram)       笏・
-笏・ - Guarded auto-ban / auto-heal                             笏・
-笏・ - PDF report generator (Daily/Weekly/Monthly)              笏・
-笏披楳笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏・
+```text
++--------------------------------------------------------------+
+| Server Agent (Linux Host)                                    |
+| - psutil metrics (CPU / memory / disk / network)             |
+| - Incremental log reading (Nginx / Apache access + error)    |
+| - JSON event emission                                        |
+| - SQLite rollup writing                                      |
++--------------------------------------------------------------+
+                            |
+                            | SQLite / JSON events
+                            v
++--------------------------------------------------------------+
+| AI Analyzer (OpenClaw)                                       |
+| - Aggregation and storage                                    |
+| - Natural-language query handling                            |
+| - AI error diagnosis                                         |
+| - Webhook delivery (DingTalk / WeCom / Feishu / Telegram)    |
+| - Guarded auto-ban / auto-heal                               |
+| - PDF report generation (daily / weekly / monthly)           |
++--------------------------------------------------------------+
 ```
 
 ### Component Flow
 
-1. **Agent Collection** 竊・`system_snapshot`, `access_event`, `error_event`
-2. **SQLite Rollups** 竊・10-minute and hourly buckets
-3. **Report Generator** 竊・Reads rollups, generates PDF/Markdown
-4. **Webhook Center** 竊・Sends alerts and reports
-5. **AI Analysis** 竊・Optional LLM-powered error explanations
+1. **Agent collection**: generates `system_snapshot`, `access_event`, and `error_event`
+2. **SQLite rollups**: writes 10-minute and 60-minute buckets
+3. **Report generator**: reads rollups and generates PDF or Markdown output
+4. **Webhook center**: sends alerts and report summaries
+5. **AI analysis**: optionally calls an LLM for explanations and recommendations
 
 ---
 
-## 投 Data Contracts
+## Data Contracts
 
 ### Core Event Types
 
@@ -271,41 +295,58 @@ Add these lines:
 ### Metric Definitions
 
 | Metric | Definition |
-|--------|-----------|
-| **PV** | Total request count in selected window |
-| **UV** | Unique visitor key (IP + user-agent fallback) |
+|--------|------------|
+| **PV** | Total request count in the selected window |
+| **UV** | Unique visitor key, typically IP plus user-agent fallback |
 | **IP Count** | Unique client IPs |
 | **QPS** | `request_count / window_seconds` |
-| **Slow Request** | `response_ms > threshold` (default: 2000ms) |
+| **Slow Request** | `response_ms > threshold`, default `2000ms` |
 | **Bandwidth Out** | Sum of response bytes |
 
 ---
 
-## 笞呻ｸ・Configuration Reference
+## Configuration Reference
 
 ### `agent` Section
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `host_id` | string | - | Logical host name for alerts/reports |
-| `site` | string | - | Site identifier for rollups |
+| `host_id` | string | - | Logical host name for alerts and reports |
 | `timezone` | string | `UTC` | Local timezone for bucket scheduling |
 | `mode` | string | `once` | `once` or `daemon` |
-| `poll_interval_seconds` | int | `60` | Agent loop interval (daemon mode) |
+| `poll_interval_seconds` | int | `60` | Agent loop interval in daemon mode |
+| `state_file` | string | `./server_agent_state.json` | Cursor state file for incremental reading |
+
+### `system_metrics` Section
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `true` | Whether to collect host-global metrics |
+| `disk_root` | string | `/` | Mount point used for disk checks |
+| `collect_network_io` | boolean | `true` | Whether to collect network I/O |
 
 ### `logs` Section
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `access_log` | string | Nginx/Apache access log path |
-| `error_log` | string | Nginx/Apache error log path |
+| `auth_log` | string | SSH auth log path; auto-detected if empty |
+
+### `sites` Section
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `domain` | string | Site domain used for report naming and SSL checks |
+| `site_host` | string | Display name for the site |
+| `enabled` | boolean | Whether this site is enabled |
+| `access_log` | string | Access log path |
+| `error_log` | string | Error log path |
 
 ### `storage` Section
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `database_file` | string | `./metrics.db` | SQLite database path |
-| `rollup_minutes` | array | `[10, 60]` | Bucket granularities |
+| `rollup_minutes` | array | `[10, 60]` | Rollup bucket granularities |
 
 ### `notifications.webhooks` Section
 
@@ -321,135 +362,149 @@ Add these lines:
 | Field | Type | Description |
 |-------|------|-------------|
 | `report_language` | string | `zh` or `en` |
-| `report_export_dir` | string | Externally exposed directory for PDFs |
-| `public_base_url` | string | URL prefix for download links |
+| `report_export_dir` | string | Export directory exposed externally for PDFs |
+| `public_base_url` | string | URL prefix for report download links |
+| `geoip_city_db` | string | GeoLite2 City database path |
+| `geoip_update_config` | string | MaxMind updater config path |
 | `daily.enabled` | boolean | Enable daily reports |
 | `daily.push_time` | string | `"08:30"` format |
-| `weekly.push_weekday` | int | `1-7` (1 = Monday) |
+| `weekly.push_weekday` | int | `1-7`, where `1` means Monday |
 | `monthly.push_day` | int | `1-28` |
+
+### `automation` Section
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `dry_run` | boolean | When `true`, actions are logged and notified but not executed |
+| `auto_ban.enabled` | boolean | Enables automatic banning |
+| `auto_ban.whitelist_ips` | array | IP allowlist |
+| `auto_ban.ban_ttl_seconds` | int | Ban TTL before automatic release |
+| `auto_heal.enabled` | boolean | Enables automatic healing |
+| `auto_heal.cooldown_seconds` | int | Cooldown between service restarts |
 
 ---
 
-## 塘 Report Types
+## Report Types
 
 ### Daily Report
 
-**Generated**: Every day at configured `push_time`
+**Generated**: every day at configured `push_time`
 
 **Contents**:
-- 投 PV, UV, IP totals for prior 24 hours
-- 櫨 Top pages, IPs, referers
-- 聞・・Spider traffic breakdown
-- 嶋 Status code distribution (2xx/3xx/4xx/5xx)
-- 笞・・Top errors and slow endpoints
-- ､・AI health commentary (if enabled)
+- PV, UV, and IP totals for the prior 24 hours
+- Top pages, top IPs, and top referers
+- Spider traffic breakdown
+- Status-code distribution (`2xx`, `3xx`, `4xx`, `5xx`)
+- Top errors and slow endpoints
+- AI health commentary, if enabled
 
 ### Weekly Report
 
-**Generated**: Every Monday at configured time
+**Generated**: every Monday at the configured time
 
 **Contents**:
-- 嶋 7-day traffic trend
-- 圻 Blocked IP trends
-- 聞・・Crawler traffic patterns
-- 笞・・Suspicious route clusters
-- 売 Recurring error fingerprints
-- ､・AI weekly summary
+- 7-day traffic trend
+- Blocked IP trends
+- Crawler traffic patterns
+- Suspicious route clusters
+- Recurring error fingerprints
+- AI weekly summary
 
 ### Monthly Report
 
-**Generated**: 1st of each month
+**Generated**: on the 1st of each month
 
 **Contents**:
-- 投 30-day traffic and performance trend
-- 沈 Disk growth analysis
-- 嶋 Bandwidth peak detection
-- 笞・・Capacity warnings
-- 肌 Remediation summary
-- ､・AI monthly review
+- 30-day traffic and performance trend
+- Disk growth analysis
+- Bandwidth peak detection
+- Capacity warnings
+- Remediation summary
+- AI monthly review
 
 ---
 
-## 圷 Alert Thresholds
+## Alert Thresholds
 
 | Alert Type | Default Threshold | Window |
-|------------|------------------|--------|
+|------------|-------------------|--------|
 | CPU High | `> 85%` | 5 consecutive minutes |
 | Memory High | `> 85%` | 5 consecutive minutes |
 | Disk Low | `< 10%` free | Instant |
 | 5xx Burst | `> 20` errors | 1 minute |
 | Suspicious IP | `> 200` RPM | 1 minute |
 | 404 Scan Burst | Sudden spike | Short window |
-| Slow Routes | `> 2000ms` avg | Alert window |
+| Slow Routes | `> 2000ms` average | Alert window |
 
 ---
 
-## 白 Safety & Automation
+## Safety and Automation
 
 ### Auto-Ban Policy (Opt-In)
 
 **Requirements**:
-- 笨・Allowlist support for trusted IPs
-- 笨・Evidence of abuse (not flash crowd)
-- 笨・Cooldown and per-hour action cap
-- 笨・TTL (e.g., 24 hours)
-- 笨・Audit record with exact command
+- Allowlist support for trusted IPs
+- Clear evidence of abuse, not just flash crowds
+- Cooldown and per-hour action caps
+- TTL, for example 24 hours
+- Audit records with exact commands
 
 **Good Candidates**:
 - Repeated request-rate breaches from one IP
-- Scanner-like user-agents + 404 spray patterns
+- Scanner-like user-agents with 404 spray patterns
 - Brute-force hits against admin routes
 
 ### Auto-Heal Policy (Conservative)
 
 **Requirements**:
-- 笨・Repeated `502` or upstream-failure evidence
-- 笨・Failing health check or secondary signal
-- 笨・One restart attempt per cooldown window
-- 笨・Post-action verification
-- 笨・Escalation path when restart fails
+- Repeated `502` or upstream-failure evidence
+- Failing health checks or a second confirming signal
+- One restart attempt per cooldown window
+- Post-action verification
+- Escalation path when restart fails
 
 **Preferred Sequence**:
 1. Alert
 2. Dry-run recommendation
-3. One guarded restart of proven failing service
-4. Re-check error rate and health
-5. Escalate instead of looping
+3. One guarded restart of a proven failing service
+4. Re-check error rate and service health
+5. Escalate instead of looping forever
 
 ---
 
-## 刀 Project Structure
+## Project Structure
 
-```
+```text
 server-mate/
-笏懌楳笏 SKILL.md                          # Skill definition and triggers
-笏懌楳笏 README.md                         # English documentation
-笏懌楳笏 README_ZH.md                      # Chinese documentation
-笏懌楳笏 user-guide.md                     # Detailed deployment guide
-笏懌楳笏 config.example.yaml               # Full example config template
-笏懌楳笏 data/
-笏・  笏披楳笏 GeoIP.conf.example          # MaxMind GeoLite2 template (copy to ./data/GeoIP.conf)
-笏懌楳笏 agents/
-笏・  笏披楳笏 openai.yaml                  # OpenAI agent interface config
-笏懌楳笏 references/
-笏・  笏懌楳笏 architecture.md              # System design and component boundaries
-笏・  笏懌楳笏 data-contracts.md            # Event schemas and metric definitions
-笏・  笏懌楳笏 ops-playbook.md              # Thresholds, alerts, and automation policies
-笏・  笏披楳笏 sqlite-schema.md             # Database schema and query patterns
-笏懌楳笏 scripts/
-笏・  笏懌楳笏 server_agent.py              # Main collector daemon
-笏・  笏懌楳笏 report_generator.py          # PDF/Markdown report generator
-笏・  笏披楳笏 webhook_center.py            # Webhook delivery service
-笏披楳笏 config.yaml                       # Configuration file (generated)
+├── SKILL.md                    # Skill definition and triggers
+├── README.md                   # English documentation
+├── README_ZH.md                # Chinese documentation
+├── user-guide.md               # Detailed deployment guide
+├── config.example.yaml         # Full example config template
+├── data/
+│   └── GeoIP.conf.example      # MaxMind GeoLite2 template; copy to ./data/GeoIP.conf
+├── agents/
+│   └── openai.yaml             # OpenAI agent interface config
+├── references/
+│   ├── architecture.md         # System design and component boundaries
+│   ├── data-contracts.md       # Event schemas and metric definitions
+│   ├── ops-playbook.md         # Thresholds, alerts, and automation policies
+│   └── sqlite-schema.md        # Database schema and query patterns
+├── scripts/
+│   ├── server_agent.py         # Main collector daemon
+│   ├── report_generator.py     # PDF and Markdown report generator
+│   └── webhook_center.py       # Webhook delivery service
+└── config.yaml                 # Runtime configuration file
 ```
 
 ---
 
-## 剥 Troubleshooting
+## Troubleshooting
 
 ### Chinese Text Shows as Squares in PDFs
 
 **Solution**:
+
 ```bash
 # CentOS / Rocky / AlmaLinux
 sudo yum install google-noto-sans-cjk-ttc-fonts
@@ -462,28 +517,28 @@ sudo apt-get install fonts-noto-cjk
 fc-cache -fv
 ```
 
-### Webhook Message Contains Only Local Path
+### Webhook Message Contains Only a Local Path
 
 **Solution**:
 1. Set `report_export_dir` in config
 2. Set `public_base_url` in config
-3. Expose export directory via Nginx or Apache
+3. Expose the export directory through Nginx or Apache
 
 ### No Report Data Appears
 
 **Solution**:
-1. Verify `database_file` path
-2. Confirm agent is writing rollups
-3. Check `site` and `host_id` match stored data
+1. Verify the `database_file` path
+2. Confirm the agent is writing rollups
+3. Confirm the configured site identifiers match the stored data scopes
 
 ### Slow Routes or Abnormal IP Sections Are Empty
 
 **Solution**:
-- Ensure latest agent version has created `slow_request_rollups` and `suspicious_ip_rollups` tables
+- Make sure the current agent version has created `slow_request_rollups` and `suspicious_ip_rollups` tables
 
 ---
 
-## 到 Support
+## Support
 
 - **GitHub Issues**: https://github.com/tankeito/server-mate/issues
 - **Repository**: https://github.com/tankeito/server-mate
@@ -491,6 +546,6 @@ fc-cache -fv
 
 ---
 
-**Server-Mate** | Lightweight Server Monitoring & AI Ops
+**Server-Mate** | Lightweight Server Monitoring and AI Ops
 
 **Developed by tankeito** | MIT License | 2026
