@@ -1,6 +1,6 @@
 {
   "name": "server-mate",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "description": "Lightweight server monitoring and AI operations workflow for Linux hosts running Nginx or Apache",
   "author": "tankeito",
   "license": "MIT",

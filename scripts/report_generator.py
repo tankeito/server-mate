@@ -3956,7 +3956,7 @@ def render_standard_pdf(report: dict[str, Any], config: dict[str, Any], output_p
             overview.add_subplot(overview_grid[0, :]),
             report,
             labels,
-            f"{labels[f'{report['meta']['report_kind']}_title']} | {labels['dashboard_page']}",
+            f"{labels[report['meta']['report_kind'] + '_title']} | {labels['dashboard_page']}",
             generated_at,
             1,
             2,
