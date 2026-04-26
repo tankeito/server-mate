@@ -6,7 +6,7 @@
 
 > 面向运行 Nginx 或 Apache 的 Linux 主机的双平面监控系统，并通过宝塔（BT-Panel）API 提供**轻量级集中式远程监控**——一台 Agent，纳管多台服务器，目标主机零安装。
 
-[![Version](https://img.shields.io/badge/version-1.3.4-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-1.4.1-blue.svg)]()
 [![OpenClaw](https://img.shields.io/badge/OpenClaw-Skill-success.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Platform-CentOS%2FUbuntu%2FDebian-lightgrey.svg)](https://linux.org)
@@ -19,7 +19,7 @@
 
 **Server-Mate** 是一套面向 Linux Web 主机的轻量级服务器监控与 AI 运维工作流，适合运行 Nginx 或 Apache 的场景。
 
-自 v1.3.4 起，Server-Mate 同时支持**轻量级集中式远程监控**：只需在一台运维管理机部署 Agent，即可通过宝塔（BT-Panel）HTTP API 远程拉取任意数量目标主机上的访问日志与错误日志。被纳管的服务器**无需安装探针、不需要常驻进程、不需要额外的依赖包**，并且现有的解析、AI 诊断、告警与 PDF 报表管道完全无缝复用。
+自 v1.4.x 起，Server-Mate 正式演进为**中心化远程监控（Centralized Remote Monitoring）架构**：仅需在一台 Agent 主机部署本组件，即可通过宝塔（BT-Panel）API 监控整个服务器集群。该集成是**无感接入（non-intrusive）**的——目标服务器**无需安装任何 Python 依赖、无需运行任何 Server-Mate 包、无需常驻进程或日志投递探针**，**唯一前提仅是开启宝塔面板的 API 权限**。现有的解析、AI 诊断、告警与 PDF 报表管道对远程站点完全无缝复用。
 
 它将职责拆分为两个平面：
 - **Server Agent**：运行在主机侧的 Python 采集器，负责本地日志增量读取（或通过宝塔 API 拉取远程日志）、主机指标采样与 SQLite 聚合落库
@@ -49,25 +49,27 @@
 
 ---
 
-## v1.3.4 新增内容
+## v1.4.1 新增内容
 
-### 宝塔面板远程集成（BT-Panel Remote Integration）
+### 宝塔 API 深度集成（Deep BT-Panel API Integration）
 
-- **零侵入集中式监控**：Server-Mate 现已支持通过宝塔（BT-Panel）HTTP API 远程拉取任意数量目标主机上的 Nginx / Apache 日志。运维人员**无需在每台被纳管服务器上安装、升级或维护探针**，仅需在管理机上部署一份 Agent 即可纳管整个集群
-- **完美复用现有管道**：远程站点直接进入既有的 `sites[]` 矩阵，流量聚合、爬虫识别、AI 诊断、Webhook 路由与 PDF 报表逻辑全部无缝复用，无需为远程场景做任何额外开发
-- **显式面板绑定**：每个站点通过 `panel_id` 字段选择数据源；留空则保持与 1.3.x 完全兼容的本地 tail 行为，按字节级别等价
+- **完整签名算法合规**：客户端现已完整实现宝塔标准签名算法——一种 HMAC 风格的 MD5 签名（HMAC-like MD5 Signature），即 `request_token = md5(str(request_time) + md5(api_key))`。**每次请求（包括重试）都会重新计算签名**，确保每次调用都携带新的 `request_time`，**绝不**复用过期 token
+- **强制 POST + 表单参数合并**：严格遵循宝塔官方文档"统一使用 POST 方式请求"的要求，将鉴权字典与业务参数合并写入同一份 `application/x-www-form-urlencoded` 表单 body
+- **Session 复用以应对高频采集**：每个面板实例化独立的 `requests.Session()`，自动复用 TCP/TLS 连接池并保持宝塔会话 Cookie。在「单面板多站点 + cron 高频拉取」场景下，握手开销被彻底消除
+- **无感多站点扇出**：远程站点统一进入既有的 `sites[]` 矩阵，流量聚合、爬虫识别、AI 诊断、Webhook 路由、PDF 报表对远程主机零侵入复用。`panel_id` 留空则保持与 1.3.x 完全字节级兼容的本地 tail 行为
 
-### 动态块截断防爆内存（Chunk-based Memory Protection）
+### 字节级流量与内存保护（Memory Safety: Byte-Level Throughput & Memory Protection）
 
-- **字节偏移增量拉取**：远程读取通过宝塔 `ExecShell` 接口下发 `tail -c +<offset> | head -c <chunk>` 命令实现，**绝不**整文件 body 拉取，从源头规避了大文件 OOM 风险
-- **5 MB 单周期硬封顶（Byte-offset chunking）**：每个 cron 周期单次拉取上限为 `chunk_bytes`（默认 5 MB）。当远程 `error_log` 在两次调度之间暴涨数百 MB 时，**网络超时与内存溢出被分类阻断**，剩余字节顺延到后续周期继续追读
-- **积压可见化**：远程游标会持久化 `backlog_bytes` 字段，并在站点落后于实时进度时主动输出 WARNING 日志，杜绝「静默漏采」场景
+- **字节偏移截断（Byte-offset chunking）**：远程读取通过宝塔 `ExecShell` 接口下发 `tail -c +<offset> | head -c <chunk>` 命令实现，**整文件 body 绝不传输**
+- **5 MB 单次拉取上限**：每个 cron 周期单次拉取上限为 `chunk_bytes`（默认 5 242 880 字节）。即便远程 `error_log` 因上游异常瞬间暴涨数百 MB，Agent 内存占用始终**保持恒定**，HTTP 超时与 OOM 被分类阻断，剩余字节自动顺延到后续 cron 周期继续追读
+- **纵深防御边界**：5 MB 上限**同时**在 Python 调用层做 clamp、并烤进远端 shell 管道本身（`head -c 5242880`），即便面板侧响应异常，内核也会在 5 MB 字节处主动断开管道
+- **积压可见化**：远程游标持久化 `backlog_bytes` 字段（`status="backlog"`），并在站点落后于实时进度时主动输出 WARNING 日志，杜绝「静默漏采」
 
-### 生产级安全防护（Production-Grade Security Guardrails）
+### 安全加固（Security Hardening）
 
-- **Shell 注入防御**：所有来自配置文件的远端路径在拼入 `ExecShell` 命令前，必须经过 `shlex.quote` 严格转义 + 控制字符（NUL / CR / LF）拒绝两层校验。即便配置中混入了恶意 payload（例如 `"/path; rm -rf /"`），最终也只会以单引号字面量形式存在于 shell 中，不可能被执行
-- **NTP 时间漂移诊断**：宝塔签名失败往往以 HTTP 200 + `{"status": false, "msg": "request_token error"}` 的形式回应，极易误导排查方向。客户端现已识别中英文双语的鉴权失败关键字，并精准追加提示日志——*"Authentication failed. Please check if the time on the Agent server and the Remote BT panel are synchronized (NTP Time Drift)."*——帮助运维快速定位时间同步问题
-- **纵深防御封顶**：5 MB 上限同时在 Python 调用层做 clamp、并烤进远端 shell 管道（`head -c 5242880`），即使面板侧响应异常，内核仍会在 5 MB 字节处主动断开管道
+- **命令注入防御（Command Injection Prevention）**：所有来自配置文件的远端 Shell 路径在拼入 `ExecShell` 命令前，必须经过 `shlex.quote` 严格转义 + 控制字符（NUL / CR / LF）拒绝双层校验。即使配置中混入恶意 payload（例如 `"/path; rm -rf /"`），最终也只能以单引号字面量形式存在于 shell 中，**绝不会被解析为独立命令**
+- **NTP 漂移自动识别（NTP Drift Auto-Detection）**：宝塔签名失败往往以 HTTP 200 + `{"status": false, "msg": "request_token error"}` 的形式返回，而非 401/403，极易误导排查方向。客户端现已识别中英文双语的鉴权失败关键字，并在异常 message 与 WARNING 日志中**同时**附加精准的修复指引——*"Authentication failed. Please check if the time on the Agent server and the Remote BT panel are synchronized (NTP Time Drift)."*
+- **站点级故障隔离**：任意单个远程面板的失败均会被捕获、记录、并写入游标的 `status` 字段，**绝不**会让一台远程不稳定导致 cron 周期崩溃，也不会饿死其他配置站点
 
 ---
 
@@ -147,7 +149,7 @@ git clone https://github.com/tankeito/server-mate.git
 cd server-mate
 
 # 安装基础依赖
-python3 -m pip install psutil pyyaml matplotlib
+python3 -m pip install psutil pyyaml matplotlib requests
 
 # 可选：启用 GeoIP 能力
 python3 -m pip install geoip2 maxminddb aiohttp
@@ -368,7 +370,7 @@ crontab -e
 | `error_log` | string | 错误日志路径，语义同 `access_log` |
 | `panel_id` | string | *可选。* 将该站点绑定到 `remote_panels` 中定义的远程宝塔面板。**留空（或省略）则走原有 `LocalLogReader` 读取本地日志**；设置后改由 `BTRemoteLogReader` 通过该面板远程拉取 |
 
-### `remote_panels` 部分 *（v1.3.4 新增）*
+### `remote_panels` 部分 *（v1.4.x 新增）*
 
 顶层映射表，键为 `panel_id`，值为一份宝塔面板连接配置。`sites[]` 通过 `panel_id` 字段引用对应面板，从而启用零侵入远程日志采集。
 

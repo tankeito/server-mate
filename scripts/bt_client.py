@@ -2,8 +2,12 @@
 """BT-Panel (Baota) HTTP client for cross-server log collection.
 
 Scope:
-- Authentication signing using the BT request_time / request_token scheme.
-- A small POST helper with timeout + bounded retry backoff.
+- BT-standard signing: request_token = md5(str(request_time) + md5(api_key)).
+- Strictly POST-only transport, per BT official documentation.
+- Connection-and-cookie reuse via a per-client requests.Session() — the agent
+  hammers the same panel many times per cron tick, so keeping the TCP/TLS
+  socket warm and the BT session cookie pinned dramatically reduces both
+  client-side latency and panel-side concurrency pressure.
 - File-content reads via the /system?action=ExecShell endpoint, using
   ``tail -c +N | head -c CHUNK`` to fetch precise incremental byte ranges
   (avoids pulling whole log files into memory through GetFileBody).
@@ -11,6 +15,11 @@ Scope:
 Security note:
     The BT api_key has full panel privileges. Never commit it to the repo.
     Prefer environment-variable injection via remote_panels.<id>.api_key_env.
+
+Dependency note:
+    Requires the third-party ``requests`` package (already a transitive
+    dependency in most Python ops environments). Connection pooling, cookie
+    persistence, and per-call timeout are all handled through requests.Session.
 
 Concurrency note:
     This client is synchronous on purpose — Server-Mate runs once per cron tick
@@ -21,9 +30,6 @@ Concurrency note:
     drop-in: the LogReader contract returns plain (lines, cursor) and does not
     care which thread called it. Threading is the cheaper option since the
     agent has no other event loop to coordinate with.
-
-This module deliberately depends only on the standard library (urllib, ssl,
-hashlib) so the agent stays installable without extra wheels.
 """
 
 from __future__ import annotations
@@ -32,13 +38,26 @@ import hashlib
 import json
 import logging
 import shlex
-import ssl
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 from dataclasses import dataclass
 from typing import Any
+
+import requests
+from requests.exceptions import (
+    ConnectionError as RequestsConnectionError,
+    HTTPError as RequestsHTTPError,
+    RequestException,
+    SSLError,
+    Timeout,
+)
+
+try:
+    # Suppress the InsecureRequestWarning when an operator explicitly opts
+    # out of TLS verification on a self-signed BT panel. Verbose stack
+    # warnings on every cron tick would drown out real diagnostics.
+    from urllib3.exceptions import InsecureRequestWarning as _InsecureRequestWarning
+except ImportError:  # pragma: no cover  - urllib3 is bundled with requests
+    _InsecureRequestWarning = None  # type: ignore[assignment]
 
 
 LOG = logging.getLogger("server_mate.bt_client")
@@ -160,77 +179,91 @@ class BTPanelClient:
                 "(set api_key_env or api_key in remote_panels)"
             )
         self.config = config
-        self._ssl_context = self._build_ssl_context(config.verify_tls)
+
+        # One Session per panel. The agent hammers the same panel many times
+        # per cron tick, so:
+        #   * connection pooling reuses TCP/TLS sockets between calls
+        #   * cookie persistence honors BT's official guidance to "save the
+        #     cookie and attach it on every subsequent request"
+        # both of which materially reduce request latency and panel CPU load.
+        self.session = requests.Session()
+        self.session.headers.update({"User-Agent": "server-mate-bt-client/1.1"})
+        self.session.verify = bool(config.verify_tls)
+        if not self.session.verify and _InsecureRequestWarning is not None:
+            # Operator explicitly opted out — silence the per-cron WARN spam
+            # (it would otherwise mask the real diagnostics from log_reader).
+            requests.packages.urllib3.disable_warnings(_InsecureRequestWarning)
+
+    def close(self) -> None:
+        """Release the underlying HTTP connection pool. Safe to call multiple times."""
+        try:
+            self.session.close()
+        except Exception:  # pragma: no cover - best-effort cleanup
+            pass
+
+    def __enter__(self) -> "BTPanelClient":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
 
     @staticmethod
-    def _build_ssl_context(verify_tls: bool) -> ssl.SSLContext:
-        if verify_tls:
-            return ssl.create_default_context()
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        return ctx
+    def _generate_auth_params(api_key: str) -> dict[str, Any]:
+        """Compute BT's standard ``request_time`` + ``request_token`` pair.
 
-    def _sign(self) -> dict[str, str]:
-        """BT-specific signing: token = md5(request_time + md5(api_key))."""
-        request_time = str(int(time.time()))
-        api_key_md5 = hashlib.md5(self.config.api_key.encode("utf-8")).hexdigest()
+        Algorithm (per BT official API docs):
+            request_time  = int(time.time())                          # Unix ts
+            sk_md5        = md5(api_key)                              # 32-hex
+            request_token = md5(str(request_time) + sk_md5)           # 32-hex
+
+        Returns a dict ready to be merged into the form-data of any POST call.
+
+        Note: ``api_key`` is taken as a parameter (rather than read from
+        ``self.config.api_key``) so the function is stateless and trivially
+        unit-testable, and so a future implementation can rotate keys per
+        request without instantiating a new client.
+        """
+        request_time = int(time.time())
+        sk_md5 = hashlib.md5(str(api_key).encode("utf-8")).hexdigest()
         request_token = hashlib.md5(
-            (request_time + api_key_md5).encode("utf-8")
+            (str(request_time) + sk_md5).encode("utf-8")
         ).hexdigest()
         return {"request_time": request_time, "request_token": request_token}
 
-    def _post(self, endpoint: str, payload: dict[str, Any]) -> Any:
-        """POST to the panel with auth + retries.
+    def _post(self, endpoint: str, payload: dict[str, Any] | None = None) -> Any:
+        """POST to the panel with merged auth + business params, with retries.
 
-        Retries are reserved for transport / 5xx-style failures. Auth or schema
-        errors raise BTPanelError immediately so the caller can short-circuit.
+        Per BT official documentation, every API call MUST be a POST and MUST
+        carry the dynamic signature. We unconditionally:
+            1. Compute fresh ``_generate_auth_params(api_key)`` per attempt
+               (re-signing on retry — important when the previous failure was
+               itself caused by clock skew that has since been corrected).
+            2. Merge the auth dict with the caller-supplied business payload
+               and submit the union as ``data=`` (form-encoded body).
+            3. Send through ``self.session.post`` so TCP/TLS and the BT
+               session cookie are reused across calls.
+
+        Retries are reserved for transport / 5xx failures. Auth and schema
+        errors short-circuit immediately so the caller can fail loudly.
         """
         url = f"{self.config.url}{endpoint}"
-        body = dict(payload)
-        body.update(self._sign())
-        encoded = urllib.parse.urlencode(body).encode("utf-8")
+        business = dict(payload or {})
 
         attempt = 0
         last_exc: Exception | None = None
         while attempt <= self.config.retries:
             attempt += 1
-            request = urllib.request.Request(
-                url,
-                data=encoded,
-                method="POST",
-                headers={
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "User-Agent": "server-mate-bt-client/1.0",
-                },
-            )
+            # Re-sign on every attempt: a fresh request_time is required if
+            # the panel rejected us due to local clock drift that has since
+            # been fixed by NTP between retries.
+            body = {**business, **self._generate_auth_params(self.config.api_key)}
             try:
-                with urllib.request.urlopen(
-                    request,
+                response = self.session.post(
+                    url,
+                    data=body,
                     timeout=self.config.timeout_seconds,
-                    context=self._ssl_context,
-                ) as response:
-                    raw = response.read().decode("utf-8", errors="replace")
-            except urllib.error.HTTPError as exc:
-                LOG.warning(
-                    "BT panel %s %s HTTP %s (attempt %s/%s)",
-                    self.config.panel_id,
-                    endpoint,
-                    exc.code,
-                    attempt,
-                    self.config.retries + 1,
                 )
-                if exc.code in (401, 403):
-                    LOG.warning(
-                        "BT panel %s rejected request at HTTP layer. %s",
-                        self.config.panel_id,
-                        NTP_DRIFT_HINT,
-                    )
-                    raise BTPanelAuthError(
-                        f"BT panel '{self.config.panel_id}' rejected request: HTTP {exc.code}. {NTP_DRIFT_HINT}"
-                    ) from exc
-                last_exc = exc
-            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            except (Timeout, RequestsConnectionError, SSLError, RequestException) as exc:
                 LOG.warning(
                     "BT panel %s %s transport error: %s (attempt %s/%s)",
                     self.config.panel_id,
@@ -241,7 +274,35 @@ class BTPanelClient:
                 )
                 last_exc = exc
             else:
-                return self._parse_response(raw)
+                # ---- HTTP-layer auth rejection ---------------------------
+                if response.status_code in (401, 403):
+                    LOG.warning(
+                        "BT panel %s %s HTTP %s — rejected at HTTP layer. %s",
+                        self.config.panel_id,
+                        endpoint,
+                        response.status_code,
+                        NTP_DRIFT_HINT,
+                    )
+                    raise BTPanelAuthError(
+                        f"BT panel '{self.config.panel_id}' rejected request: "
+                        f"HTTP {response.status_code}. {NTP_DRIFT_HINT}"
+                    )
+                # ---- 5xx is transient: retry (don't burn an attempt slot
+                #      on a hard error) ----------------------------------
+                if 500 <= response.status_code < 600:
+                    LOG.warning(
+                        "BT panel %s %s HTTP %s (attempt %s/%s) — retrying",
+                        self.config.panel_id,
+                        endpoint,
+                        response.status_code,
+                        attempt,
+                        self.config.retries + 1,
+                    )
+                    last_exc = RequestsHTTPError(
+                        f"HTTP {response.status_code}", response=response
+                    )
+                else:
+                    return self._parse_response(response)
 
             if attempt <= self.config.retries:
                 time.sleep(min(2 ** (attempt - 1), 5))
@@ -250,13 +311,21 @@ class BTPanelClient:
         )
 
     @staticmethod
-    def _parse_response(raw: str) -> Any:
-        if not raw:
+    def _parse_response(response: requests.Response) -> Any:
+        """Parse a BT response. Returns dict (JSON), str (plain text), or None."""
+        text = response.text or ""
+        if not text:
             return None
+        # requests.Response.json() handles encoding detection; fall back to a
+        # bare json.loads + raw text when the panel returns a non-JSON blob
+        # (e.g. some legacy ExecShell wrappers).
         try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            return raw
+            return response.json()
+        except ValueError:
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                return text
 
     def exec_shell(self, shell: str) -> str:
         """Execute a shell snippet on the remote host.

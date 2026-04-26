@@ -1,6 +1,6 @@
 {
   "name": "server-mate",
-  "version": "1.3.4",
+  "version": "1.4.1",
   "description": "Lightweight, centralized server monitoring and AI operations workflow for Linux hosts running Nginx or Apache, with optional BT-Panel API integration for agentless remote log collection",
   "author": "tankeito",
   "license": "MIT",
@@ -47,7 +47,8 @@
     "packages": [
       "psutil",
       "pyyaml",
-      "matplotlib"
+      "matplotlib",
+      "requests"
     ],
     "optional": [
       "geoip2",
@@ -153,5 +154,6 @@
     "default_data_dir": "./data/"
   },
   "created_at": "2026-03-26",
-  "updated_at": "2026-04-26"
+  "updated_at": "2026-04-26",
+  "release_channel": "1.4.x — Centralized Remote Monitoring"
 }

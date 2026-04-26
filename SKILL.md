@@ -1,6 +1,6 @@
 ---
 name: server-mate
-version: 1.3.4
+version: 1.4.1
 description: Build or extend a lightweight server monitoring and AI operations workflow for Linux hosts running Nginx or Apache, with optional centralized remote monitoring through the BT-Panel (Baota) HTTP API. Use when Codex needs to collect psutil metrics, parse access, error, or auth logs (locally OR pulled remotely from BT panels with no probe on the target host), design JSON payloads or APIs, add webhook alerts, generate PDF ops reports with SSL expiry summaries, answer natural-language monitoring questions, or implement guarded auto-ban and auto-heal behaviors.
 homepage: https://github.com/tankeito/server-mate
 metadata:
@@ -15,7 +15,7 @@ metadata:
 
 # Server Mate
 
-Version: `1.3.4`
+Version: `1.4.1`
 
 Use this skill to design or implement a two-plane monitoring system:
 - a Python agent that tails local logs OR pulls remote logs through the BT-Panel HTTP API (centralized, agentless), and samples host metrics
@@ -51,8 +51,14 @@ The same Agent serves both layouts: leave `panel_id` empty on a site to keep the
    - Add rollup metrics and natural-language answers next.
    - Add webhook alerts after the counters are stable.
    - Enable auto-ban or auto-heal only when thresholds, cooldowns, allowlists, and audit logs already exist.
-3. Validate with real or synthetic logs before changing production services.
-4. Explain caveats in plain language.
+3. **Remote panel connectivity test (mandatory before first collection of any new BT panel).** When `remote_panels` and `sites[].panel_id` are first wired up, do not jump straight into `--once`. First prove the auth handshake works end-to-end with a minimal, side-effect-free probe:
+   - Instantiate the panel client (`build_panel_registry` or equivalent).
+   - Issue ONE `BTPanelClient.exec_shell("echo server-mate-probe")` per panel and assert the returned stdout equals `server-mate-probe`.
+   - On `BTPanelAuthError`: the most common root cause is **NTP clock drift** between the Agent host and the panel host — surface the hint emitted by the client and have the operator run `chronyc tracking` / `timedatectl status` on both ends before re-trying. Also verify `api_key_env` actually resolves to a non-empty string and that the panel URL includes the correct port.
+   - On any other `BTPanelError`: confirm the panel URL is reachable from the Agent host, the panel's API access switch is enabled, and that no firewall is blocking the port.
+   - Only after the probe succeeds for every configured panel may the agent enter normal cron-driven collection.
+4. Validate with real or synthetic logs before changing production services.
+5. Explain caveats in plain language.
    - Example: UV is often an approximation based on IP and user-agent unless the site provides a stronger visitor key.
    - Example: upload bandwidth is unavailable unless the access log includes request length or a similar field.
 
@@ -68,6 +74,7 @@ The same Agent serves both layouts: leave `panel_id` empty on a site to keep the
 - Separate parsing, aggregation, transport, and action execution so that HTTP push, stdout replay, file drop, or websocket transport can be swapped independently.
 - Keep unknown lines and parser failures as first-class counters instead of dropping them silently.
 - When the user asks to monitor a remote server that already runs BT-Panel (Baota), do **not** instruct them to install Server-Mate, a daemon, or any extra package on that target. Instead, guide them to declare the panel under the global `remote_panels` block in `config.yaml` and bind the relevant `sites[]` entry to it via `panel_id`. The local Agent will pull access / error logs through the BT HTTP API automatically. Always inject the `api_key` via `api_key_env`, never as plaintext, and remind the user that `config.yaml` containing any panel credential must stay out of version control.
+- Any code path that builds a remote shell command **must** route every operator-supplied path through the project's `_safe_remote_path` helper (or an equivalent: `shlex.quote` PLUS a structural rejection of NUL / CR / LF / empty input). Never f-string a raw `remote_path`, glob, or filename into an `ExecShell` payload, even when the value "obviously" comes from `config.yaml` — configuration is an attacker-controlled surface in multi-tenant or shared-checkout deployments. The same rule applies to any new BT API helper added later (file move, log rotate, restart command, etc.): validate, then quote, then splice.
 
 ## Analyzer rules
 
@@ -115,15 +122,19 @@ Use external scheduling for production unless the user explicitly wants an alway
   - Monthly PDF push on day `1` at `01:20`.
 - In multi-site mode, a single scheduled `report_generator.py` run should iterate over every configured site unless the user explicitly passes `--site`.
 
-## Release notes for 1.3.4
+## Release notes for 1.4.1
 
-- BT-Panel (Baota) remote integration: per-cron incremental log pull from any number of remote hosts via the HTTP API, with no probe required on the target server. Configured through a global `remote_panels` mapping plus per-site `panel_id` binding.
-- Chunk-based memory protection: each cycle issues a single `tail -c +<offset> | head -c <chunk>` ExecShell call capped at `chunk_bytes` (default 5 MB). When a remote `error_log` explodes by hundreds of MB the residual rolls over to subsequent cron ticks; OOM and HTTP timeout are categorically prevented. Backlog is stamped into the persisted cursor (`backlog_bytes`, `status="backlog"`) and emitted as a WARNING.
-- Production-grade security guardrails:
-  - Shell-injection defense via `shlex.quote` plus a NUL/CR/LF rejection wrapper on every remote path before it is spliced into any ExecShell command.
-  - NTP time-drift detection: HTTP 401/403 *and* HTTP 200 + `{"status": false, "msg": "request_token error"}` payloads are recognised (English + Chinese variants) and surfaced with the operator-facing hint *"Authentication failed. Please check if the time on the Agent server and the Remote BT panel are synchronized (NTP Time Drift)."*
-- LogReader abstraction (`scripts/log_reader.py`) with `LocalLogReader` (delegates to the existing inode/truncate-aware function) and `BTRemoteLogReader` (maintains `remote_offset` + `remote_size`, treats `remote_size < remote_offset` as logrotate). State persists into the existing `server_agent_state.json` so restarts neither double-read nor lose remote bytes.
-- Per-site try/except in `run_cycle`: a single flaky panel can never crash the cron tick or starve other sites.
+- **Centralized Remote Monitoring architecture**: Server-Mate is now formally a single-Agent-many-hosts collector. Local sites (`panel_id` empty) and remote sites (`panel_id` bound to a `remote_panels` entry) coexist in the same `sites[]` matrix and share every downstream pipeline (rollups, AI diagnosis, webhooks, PDF reports). Target servers require **only** that BT-Panel API access is enabled — no Python interpreter, no probe, no daemon, no log shipper.
+- **Deep BT-Panel API integration**:
+  - Compliant signing scheme — HMAC-like MD5 signature: `request_token = md5(str(request_time) + md5(api_key))`, regenerated on every attempt (including retries).
+  - Strict POST-only transport per BT official documentation, with auth and business parameters merged into the same `application/x-www-form-urlencoded` body.
+  - `requests.Session()` per panel for TCP/TLS pooling and BT cookie persistence — eliminates handshake overhead in cron-driven, high-frequency workloads.
+- **Memory safety — byte-level throughput protection**: each cycle issues a single `tail -c +<offset> | head -c <chunk>` ExecShell call capped at `chunk_bytes` (default 5 MB). When a remote `error_log` explodes by hundreds of MB the Agent's memory footprint stays constant, OOM and HTTP timeout are categorically prevented, and residual bytes roll over to subsequent cron ticks. Backlog is stamped into the persisted cursor (`backlog_bytes`, `status="backlog"`) and emitted as a WARNING.
+- **Security hardening**:
+  - Command-injection defense via `_safe_remote_path` = `shlex.quote` + structural NUL/CR/LF rejection — applied to every remote path before it is spliced into any ExecShell command. Mandatory for every new BT helper added later.
+  - NTP time-drift auto-detection: HTTP 401/403 *and* HTTP 200 + `{"status": false, "msg": "request_token error"}` payloads are recognised (English + Chinese variants) and surfaced with the operator-facing hint *"Authentication failed. Please check if the time on the Agent server and the Remote BT panel are synchronized (NTP Time Drift)."* — both in the raised `BTPanelAuthError` and in the WARNING log.
+- **LogReader abstraction** (`scripts/log_reader.py`): `LocalLogReader` (delegates to the existing inode/truncate-aware function) and `BTRemoteLogReader` (maintains `remote_offset` + `remote_size`, treats `remote_size < remote_offset` as logrotate). State persists into the existing `server_agent_state.json` so restarts neither double-read nor lose remote bytes.
+- **Per-site fault isolation** in `run_cycle`: a single flaky panel can never crash the cron tick or starve other sites; the failure is captured and stamped into the cursor's `status` field for operator visibility.
 
 ## Release notes for 1.3.2
 

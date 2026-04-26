@@ -6,7 +6,7 @@ English | [Chinese](README_ZH.md)
 
 > A two-plane monitoring system for Linux hosts running Nginx or Apache, now with **lightweight centralized remote monitoring** via BT-Panel API — one Agent, many servers, no remote installation required.
 
-[![Version](https://img.shields.io/badge/version-1.3.4-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-1.4.1-blue.svg)]()
 [![OpenClaw](https://img.shields.io/badge/OpenClaw-Skill-success.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Platform-CentOS%2FUbuntu%2FDebian-lightgrey.svg)](https://linux.org)
@@ -19,7 +19,7 @@ English | [Chinese](README_ZH.md)
 
 **Server-Mate** is a lightweight server monitoring and AI operations workflow for Linux web hosts running Nginx or Apache.
 
-Starting in v1.3.4 it also operates as a **lightweight centralized remote monitoring** stack: deploy the Agent on a single management box and pull access / error logs from any number of remote hosts via the BT-Panel (Baota) HTTP API. There is no probe, daemon, or extra package to install on the target servers — and the existing parsing, AI diagnosis, alerting, and PDF report pipelines apply to remote sites without any additional wiring.
+As of v1.4.x, Server-Mate has formally evolved into a **Centralized Remote Monitoring** architecture: a single Agent host can monitor an entire fleet by pulling logs through the BT-Panel (Baota) HTTP API. The integration is **non-intrusive by design** — the only requirement on a target server is that BT-Panel API access is enabled. No Python interpreter, no Server-Mate package, no probe, no daemon, and no log shipping agent ever needs to be installed on the monitored host. The existing parsing, AI diagnosis, alerting, and PDF report pipelines apply to remote sites with no additional wiring.
 
 It splits responsibilities into two planes:
 - **Server Agent**: a Python collector that tails local logs (or pulls remote logs through BT-Panel), samples host metrics, and writes SQLite rollups
@@ -49,25 +49,27 @@ It splits responsibilities into two planes:
 
 ---
 
-## What's New in v1.3.4
+## What's New in v1.4.1
 
-### BT-Panel Remote Integration
+### Deep BT-Panel API Integration
 
-- **Agentless centralized monitoring**: Server-Mate now collects Nginx and Apache logs from any number of remote hosts through the BT-Panel (Baota) HTTP API. Operators no longer need to install, patch, or maintain a probe on each target server — a single Agent on the management host fans out to every configured panel
-- **Native multi-site reuse**: remote sites flow into the same `sites[]` matrix as local ones, so traffic rollups, spider classification, AI diagnosis, webhook routing, and PDF reports are reused as-is
-- **Explicit panel binding**: each site selects its data source via a `panel_id`; an empty `panel_id` keeps the legacy local-tail behaviour byte-for-byte compatible
+- **Compliant signing scheme**: the client now implements BT-Panel's full standard signing algorithm — an HMAC-like MD5 signature where `request_token = md5(str(request_time) + md5(api_key))`. The signature is regenerated on every attempt (including retries), guaranteeing each request carries a fresh `request_time` and never replays a stale token
+- **POST-only transport with merged form data**: per BT's official documentation, every call is issued as `POST` with the auth dict merged into the same `application/x-www-form-urlencoded` body as the business parameters
+- **Session pooling for high-frequency collection**: each panel is backed by a per-client `requests.Session()`. Connection pooling (TCP/TLS reuse) and BT session-cookie persistence are honoured automatically, eliminating per-call handshake overhead in cron-driven workloads with many sites per panel
+- **Agentless multi-site fan-out**: remote sites flow into the same `sites[]` matrix as local ones. Traffic rollups, spider classification, AI diagnosis, webhook routing, and PDF reports apply to remote hosts with zero additional wiring. Setting `panel_id` to empty preserves legacy local-tail behaviour byte-for-byte
 
-### Chunk-based Memory Protection
+### Memory Safety: Byte-Level Throughput & Memory Protection
 
-- **Byte-offset incremental fetching**: remote reads are issued as `tail -c +<offset> | head -c <chunk>` over BT's `ExecShell` endpoint, so we never pull a full file body across the network
-- **5 MB single-cycle cap (Byte-offset chunking)**: each cron tick fetches at most `chunk_bytes` (default 5 MB). When a remote `error_log` explodes by hundreds of megabytes, network timeout and OOM are categorically prevented; the residual bytes roll over to subsequent cron ticks
-- **Backlog visibility**: a `backlog_bytes` field is stamped into the persisted cursor and an operator-facing warning is emitted whenever a site is falling behind real-time, so silent under-collection cannot occur
+- **Byte-offset chunking**: remote reads are issued as `tail -c +<offset> | head -c <chunk>` over BT's `ExecShell` endpoint, so the full file body never traverses the network
+- **5 MB single-cycle pull ceiling**: each cron tick fetches at most `chunk_bytes` (default 5 242 880 bytes). When a remote `error_log` explodes by hundreds of megabytes due to an upstream incident, the Agent's memory footprint stays **constant**; HTTP timeout and OOM are categorically prevented and the residual bytes roll over to subsequent cron ticks
+- **Defense-in-depth bounding**: the 5 MB ceiling is enforced both at the Python caller layer AND inside the remote shell pipeline itself (`head -c 5242880`), so even an anomalous panel response cannot push past the bound
+- **Backlog visibility**: a `backlog_bytes` field is stamped onto the persisted remote cursor (`status="backlog"`) and a WARNING is emitted whenever a site is falling behind real-time, so silent under-collection cannot occur
 
-### Production-Grade Security Guardrails
+### Security Hardening
 
-- **Shell-injection defense**: every remote file path supplied by configuration is hardened with `shlex.quote` plus a structural check that rejects embedded NUL/CR/LF, before being spliced into any `ExecShell` command. A malicious `access_log` value such as `"/path; rm -rf /"` is contained inside a single-quoted shell literal and never executed
-- **NTP time-drift detection**: BT signature failures often surface as cryptic HTTP 200 + `{"status": false, "msg": "request_token error"}` payloads. The client now recognises both English and Chinese variants of the auth-failure message and emits a precise warning — *"Authentication failed. Please check if the time on the Agent server and the Remote BT panel are synchronized (NTP Time Drift)."* — so operators stop chasing the wrong root cause
-- **Defense-in-depth chunk cap**: the 5 MB ceiling is enforced both inside the Python caller AND on the remote shell pipeline (`head -c 5242880`), so a buggy panel response cannot blow past the bound
+- **Command-injection defense**: every remote shell path supplied via configuration is hardened with `shlex.quote` plus a structural check that rejects embedded NUL / CR / LF before being spliced into any `ExecShell` command. A malicious `access_log` value such as `"/path; rm -rf /"` is contained inside a single-quoted shell literal and is never interpreted as a separate token
+- **NTP time-drift auto-detection**: BT signature failures most commonly surface as cryptic HTTP 200 + `{"status": false, "msg": "request_token error"}` payloads, not as 401/403. The client now recognises both English and Chinese variants of the auth-failure message and emits a precise, actionable hint — *"Authentication failed. Please check if the time on the Agent server and the Remote BT panel are synchronized (NTP Time Drift)."* — both in the raised exception and in the WARNING log, so operators stop chasing the wrong root cause
+- **Per-site fault isolation**: a failure in any one remote panel is caught, logged, and stamped into the cursor's `status` field; it cannot crash the cron tick or starve the other configured sites
 
 ---
 
@@ -147,7 +149,7 @@ git clone https://github.com/tankeito/server-mate.git
 cd server-mate
 
 # Install dependencies
-python3 -m pip install psutil pyyaml matplotlib
+python3 -m pip install psutil pyyaml matplotlib requests
 
 # Optional: GeoIP support
 python3 -m pip install geoip2 maxminddb aiohttp
@@ -368,7 +370,7 @@ Add these lines:
 | `error_log` | string | Error log path. Same semantics as `access_log` |
 | `panel_id` | string | *Optional.* Binds this site to a remote BT panel defined in `remote_panels`. Leave empty (or omit) to read local files via the original `LocalLogReader`. When set, logs are pulled through the bound panel via `BTRemoteLogReader` |
 
-### `remote_panels` Section *(new in 1.3.4)*
+### `remote_panels` Section *(new in 1.4.x)*
 
 A top-level mapping from `panel_id` to a BT-Panel connection profile. Sites reference these profiles via their `panel_id` field to enable agentless remote log collection.
 
