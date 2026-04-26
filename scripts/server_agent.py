@@ -29,6 +29,13 @@ from urllib.parse import urlparse
 from webhook_center import SEVERITY_RANK, send_markdown_message
 
 try:
+    from bt_client import build_panel_registry  # noqa: F401  (lazy use)
+    from log_reader import make_log_reader
+except ImportError:  # pragma: no cover  - bt_client / log_reader are optional siblings
+    build_panel_registry = None  # type: ignore[assignment]
+    make_log_reader = None  # type: ignore[assignment]
+
+try:
     from zoneinfo import ZoneInfo
 except ImportError:  # pragma: no cover
     ZoneInfo = None
@@ -161,8 +168,10 @@ DEFAULT_CONFIG = {
             "enabled": True,
             "access_log": "./access.log",
             "error_log": "./error.log",
+            "panel_id": "",
         }
     ],
+    "remote_panels": {},
     "thresholds": {
         "summary_window_minutes": 10,
         "slow_ms": 2000.0,
@@ -556,13 +565,68 @@ def normalize_site_entry(
         access_log_value = fallback_access_log
     if not error_log_value and fallback_error_log is not None:
         error_log_value = fallback_error_log
+
+    panel_id = str(site_data.get("panel_id") or "").strip()
+    if panel_id:
+        # Remote site: access_log/error_log are absolute paths on the remote host.
+        # Do NOT rewrite them through resolve_config_path (that would prefix with
+        # the local worktree base_dir, producing a meaningless path).
+        access_log_resolved = str(access_log_value or "").strip()
+        error_log_resolved = str(error_log_value or "").strip()
+    else:
+        access_log_resolved = str(
+            resolve_config_path(base_dir, access_log_value or f"./site-{index}.access.log")
+        )
+        error_log_resolved = str(
+            resolve_config_path(base_dir, error_log_value or f"./site-{index}.error.log")
+        )
+
     return {
         "domain": domain or f"site-{index}",
         "site_host": site_host or domain or f"site-{index}",
         "enabled": bool(site_data.get("enabled", True)),
-        "access_log": str(resolve_config_path(base_dir, access_log_value or f"./site-{index}.access.log")),
-        "error_log": str(resolve_config_path(base_dir, error_log_value or f"./site-{index}.error.log")),
+        "access_log": access_log_resolved,
+        "error_log": error_log_resolved,
+        "panel_id": panel_id,
     }
+
+
+def normalize_remote_panels(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Normalize the global remote_panels mapping.
+
+    Each panel entry is keyed by panel_id. api_key may come from api_key_env (preferred)
+    or be embedded as plaintext (discouraged). Missing keys are kept so the agent can
+    skip remote sites cleanly with a logged error rather than crashing on startup.
+    """
+    raw = config.get("remote_panels")
+    panels: dict[str, dict[str, Any]] = {}
+    if not isinstance(raw, dict):
+        config["remote_panels"] = panels
+        return panels
+
+    for raw_id, raw_entry in raw.items():
+        panel_id = str(raw_id or "").strip()
+        if not panel_id or not isinstance(raw_entry, dict):
+            continue
+        url = str(raw_entry.get("url") or "").strip().rstrip("/")
+        api_key_env = str(raw_entry.get("api_key_env") or "").strip()
+        api_key = str(raw_entry.get("api_key") or "").strip()
+        if api_key_env:
+            env_value = os.environ.get(api_key_env, "").strip()
+            if env_value:
+                api_key = env_value
+        panels[panel_id] = {
+            "panel_id": panel_id,
+            "url": url,
+            "api_key": api_key,
+            "api_key_env": api_key_env,
+            "timeout_seconds": max(int(raw_entry.get("timeout_seconds", 15)), 1),
+            "retries": max(int(raw_entry.get("retries", 2)), 0),
+            "chunk_bytes": max(int(raw_entry.get("chunk_bytes", 524288)), 4096),
+            "verify_tls": bool(raw_entry.get("verify_tls", True)),
+        }
+    config["remote_panels"] = panels
+    return panels
 
 
 def normalize_sites_config(config: dict[str, Any], base_dir: Path) -> list[dict[str, Any]]:
@@ -707,6 +771,7 @@ def normalize_config(config: dict[str, Any], config_path: Path) -> dict[str, Any
     else:
         logs["auth_log"] = detect_default_auth_log_path()
 
+    normalize_remote_panels(config)
     normalize_sites_config(config, base_dir)
 
     thresholds["summary_window_minutes"] = max(
@@ -3622,6 +3687,23 @@ def run_cycle(
     sites = resolve_sites(config)
     expired_unbans = release_expired_bans(connection, config, now)
 
+    # Build BT panel clients once per cycle so multi-site, same-panel layouts
+    # share TCP/TLS sessions and a single auth signature window.
+    panel_registry: dict[str, Any] = {}
+    if build_panel_registry is not None:
+        panel_registry = build_panel_registry(config.get("remote_panels") or {})
+
+    # ------------------------------------------------------------------ #
+    # Host-local system metrics.                                         #
+    # psutil only sees THIS box. Sites that route via panel_id still     #
+    # share these CPU/mem/disk numbers — that is intentional for v1.     #
+    # FUTURE: to surface per-remote-host metrics, add a `host_metrics`   #
+    # collector that shells out via BTPanelClient.exec_shell (e.g.       #
+    # `top -bn1`, `df -PT`, `cat /proc/meminfo`) and emit one snapshot   #
+    # per panel_id. Wire it in here, alongside the local snapshot, and   #
+    # tag events with `host_id = panel_id` so downstream rollups stay    #
+    # disambiguated. Phase 1 deliberately leaves this as a no-op.        #
+    # ------------------------------------------------------------------ #
     system_metrics = config.get("system_metrics", {})
     if system_metrics.get("enabled", True):
         system_snapshot = collect_system_snapshot(
@@ -3681,21 +3763,70 @@ def run_cycle(
         domain = str(site.get("domain") or "default")
         site_config = build_site_runtime_config(config, site)
         site_state = ensure_site_state(state, domain)
-        access_path = Path(site_config["logs"]["access_log"])
-        error_path = Path(site_config["logs"]["error_log"])
+        access_path_raw = site_config["logs"]["access_log"]
+        error_path_raw = site_config["logs"]["error_log"]
+        access_path = Path(access_path_raw) if access_path_raw else Path("")
+        error_path = Path(error_path_raw) if error_path_raw else Path("")
+        panel_id = str(site.get("panel_id") or "").strip()
 
-        access_lines, access_cursor = read_incremental_lines(
-            access_path,
-            site_state["cursors"].get("access_log"),
-            config["agent"]["startup_mode"],
-            config["agent"]["bootstrap_tail_lines"],
-        )
-        error_lines, error_cursor = read_incremental_lines(
-            error_path,
-            site_state["cursors"].get("error_log"),
-            config["agent"]["startup_mode"],
-            config["agent"]["bootstrap_tail_lines"],
-        )
+        # Pick the right reader per log per site. Wrapping the entire fetch in
+        # try/except is the contract for Stage 5: ONE flaky remote panel must
+        # never bubble up and crash the cron tick or starve the other sites.
+        try:
+            if make_log_reader is None:
+                # Defensive: log_reader module not importable for some reason.
+                # Fall back to the original local-only path so we never silently
+                # stop collecting on local sites.
+                access_lines, access_cursor = read_incremental_lines(
+                    access_path,
+                    site_state["cursors"].get("access_log"),
+                    config["agent"]["startup_mode"],
+                    config["agent"]["bootstrap_tail_lines"],
+                )
+                error_lines, error_cursor = read_incremental_lines(
+                    error_path,
+                    site_state["cursors"].get("error_log"),
+                    config["agent"]["startup_mode"],
+                    config["agent"]["bootstrap_tail_lines"],
+                )
+            else:
+                access_reader = make_log_reader(
+                    str(access_path_raw or ""),
+                    panel_id,
+                    panel_registry,
+                    config["agent"]["startup_mode"],
+                    config["agent"]["bootstrap_tail_lines"],
+                )
+                error_reader = make_log_reader(
+                    str(error_path_raw or ""),
+                    panel_id,
+                    panel_registry,
+                    config["agent"]["startup_mode"],
+                    config["agent"]["bootstrap_tail_lines"],
+                )
+                access_lines, access_cursor = access_reader.read_incremental(
+                    site_state["cursors"].get("access_log")
+                )
+                error_lines, error_cursor = error_reader.read_incremental(
+                    site_state["cursors"].get("error_log")
+                )
+        except Exception as exc:  # pragma: no cover - defensive net for Stage 5
+            # Last-resort guard: a reader subclass should NEVER raise, but if it
+            # does, the agent must keep running. Drain to empty for this cycle
+            # and stamp the cursor so the failure is visible in state.json.
+            print(
+                f"[server_mate] site={domain} log read failed: {exc}",
+                file=sys.stderr,
+            )
+            access_lines = []
+            error_lines = []
+            access_cursor = dict(site_state["cursors"].get("access_log") or {})
+            error_cursor = dict(site_state["cursors"].get("error_log") or {})
+            access_cursor["status"] = "reader_exception"
+            error_cursor["status"] = "reader_exception"
+            access_cursor["last_error"] = str(exc)[:500]
+            error_cursor["last_error"] = str(exc)[:500]
+
         site_state["cursors"]["access_log"] = access_cursor
         site_state["cursors"]["error_log"] = error_cursor
 
@@ -3732,8 +3863,10 @@ def run_cycle(
         site_results[domain] = {
             "site": domain,
             "site_host": str(site.get("site_host") or domain),
-            "access_log": str(access_path),
-            "error_log": str(error_path),
+            "access_log": str(access_path_raw or access_path),
+            "error_log": str(error_path_raw or error_path),
+            "panel_id": panel_id,
+            "log_source": "bt_remote" if panel_id else "local",
             "parser_stats": {
                 "access_lines_read": len(access_lines),
                 "access_lines_dropped": dropped_access,

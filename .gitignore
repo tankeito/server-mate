@@ -17,6 +17,7 @@ reports/
 exports/
 data/
 public-reports/
+claude/
 
 # Runtime logs and temp files
 *.log

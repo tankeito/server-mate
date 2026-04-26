@@ -4,9 +4,9 @@
 
 # Server-Mate | 轻量级服务器监控与 AI 运维
 
-> 面向运行 Nginx 或 Apache 的 Linux 主机的双平面监控系统。
+> 面向运行 Nginx 或 Apache 的 Linux 主机的双平面监控系统，并通过宝塔（BT-Panel）API 提供**轻量级集中式远程监控**——一台 Agent，纳管多台服务器，目标主机零安装。
 
-[![Version](https://img.shields.io/badge/version-1.3.3-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-1.3.4-blue.svg)]()
 [![OpenClaw](https://img.shields.io/badge/OpenClaw-Skill-success.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Platform-CentOS%2FUbuntu%2FDebian-lightgrey.svg)](https://linux.org)
@@ -19,12 +19,15 @@
 
 **Server-Mate** 是一套面向 Linux Web 主机的轻量级服务器监控与 AI 运维工作流，适合运行 Nginx 或 Apache 的场景。
 
+自 v1.3.4 起，Server-Mate 同时支持**轻量级集中式远程监控**：只需在一台运维管理机部署 Agent，即可通过宝塔（BT-Panel）HTTP API 远程拉取任意数量目标主机上的访问日志与错误日志。被纳管的服务器**无需安装探针、不需要常驻进程、不需要额外的依赖包**，并且现有的解析、AI 诊断、告警与 PDF 报表管道完全无缝复用。
+
 它将职责拆分为两个平面：
-- **Server Agent**：运行在主机侧的 Python 采集器，负责日志增量读取、主机指标采样与 SQLite 聚合落库
+- **Server Agent**：运行在主机侧的 Python 采集器，负责本地日志增量读取（或通过宝塔 API 拉取远程日志）、主机指标采样与 SQLite 聚合落库
 - **AI Analyzer**：运行在 OpenClaw 侧的聚合与解释层，负责报表生成、Webhook 推送、AI 诊断与受控自动化
 
 ### 核心特性
 
+- **集中式远程采集**：通过宝塔 API 远程拉取多主机的 Nginx / Apache 日志，目标机器零安装、零依赖
 - **实时指标采集**：通过 `psutil` 采集 CPU、内存、磁盘、负载、网络 I/O
 - **日志解析**：标准化 Nginx / Apache 的访问日志与错误日志
 - **流量分析**：统计 PV、UV、IP 数、QPS、带宽、状态码分布
@@ -43,6 +46,28 @@
 - 自动化生成日报、周报和月报，掌握流量、性能和安全趋势
 - 识别可疑 IP、404 扫描、5xx 峰值和 SSH 暴破行为
 - 以白名单、TTL 和审计留痕为前提，安全启用自动化干预
+
+---
+
+## v1.3.4 新增内容
+
+### 宝塔面板远程集成（BT-Panel Remote Integration）
+
+- **零侵入集中式监控**：Server-Mate 现已支持通过宝塔（BT-Panel）HTTP API 远程拉取任意数量目标主机上的 Nginx / Apache 日志。运维人员**无需在每台被纳管服务器上安装、升级或维护探针**，仅需在管理机上部署一份 Agent 即可纳管整个集群
+- **完美复用现有管道**：远程站点直接进入既有的 `sites[]` 矩阵，流量聚合、爬虫识别、AI 诊断、Webhook 路由与 PDF 报表逻辑全部无缝复用，无需为远程场景做任何额外开发
+- **显式面板绑定**：每个站点通过 `panel_id` 字段选择数据源；留空则保持与 1.3.x 完全兼容的本地 tail 行为，按字节级别等价
+
+### 动态块截断防爆内存（Chunk-based Memory Protection）
+
+- **字节偏移增量拉取**：远程读取通过宝塔 `ExecShell` 接口下发 `tail -c +<offset> | head -c <chunk>` 命令实现，**绝不**整文件 body 拉取，从源头规避了大文件 OOM 风险
+- **5 MB 单周期硬封顶（Byte-offset chunking）**：每个 cron 周期单次拉取上限为 `chunk_bytes`（默认 5 MB）。当远程 `error_log` 在两次调度之间暴涨数百 MB 时，**网络超时与内存溢出被分类阻断**，剩余字节顺延到后续周期继续追读
+- **积压可见化**：远程游标会持久化 `backlog_bytes` 字段，并在站点落后于实时进度时主动输出 WARNING 日志，杜绝「静默漏采」场景
+
+### 生产级安全防护（Production-Grade Security Guardrails）
+
+- **Shell 注入防御**：所有来自配置文件的远端路径在拼入 `ExecShell` 命令前，必须经过 `shlex.quote` 严格转义 + 控制字符（NUL / CR / LF）拒绝两层校验。即便配置中混入了恶意 payload（例如 `"/path; rm -rf /"`），最终也只会以单引号字面量形式存在于 shell 中，不可能被执行
+- **NTP 时间漂移诊断**：宝塔签名失败往往以 HTTP 200 + `{"status": false, "msg": "request_token error"}` 的形式回应，极易误导排查方向。客户端现已识别中英文双语的鉴权失败关键字，并精准追加提示日志——*"Authentication failed. Please check if the time on the Agent server and the Remote BT panel are synchronized (NTP Time Drift)."*——帮助运维快速定位时间同步问题
+- **纵深防御封顶**：5 MB 上限同时在 Python 调用层做 clamp、并烤进远端 shell 管道（`head -c 5242880`），即使面板侧响应异常，内核仍会在 5 MB 字节处主动断开管道
 
 ---
 
@@ -339,8 +364,52 @@ crontab -e
 | `domain` | string | 站点域名，用于报表命名与 SSL 巡检 |
 | `site_host` | string | 站点展示名称，可与域名一致 |
 | `enabled` | boolean | 是否启用该站点监控 |
-| `access_log` | string | 访问日志路径 |
-| `error_log` | string | 错误日志路径 |
+| `access_log` | string | 访问日志路径。未设置 `panel_id` 时为本地路径；设置 `panel_id` 后必须填写**远端主机上的绝对路径** |
+| `error_log` | string | 错误日志路径，语义同 `access_log` |
+| `panel_id` | string | *可选。* 将该站点绑定到 `remote_panels` 中定义的远程宝塔面板。**留空（或省略）则走原有 `LocalLogReader` 读取本地日志**；设置后改由 `BTRemoteLogReader` 通过该面板远程拉取 |
+
+### `remote_panels` 部分 *（v1.3.4 新增）*
+
+顶层映射表，键为 `panel_id`，值为一份宝塔面板连接配置。`sites[]` 通过 `panel_id` 字段引用对应面板，从而启用零侵入远程日志采集。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `<panel_id>` | string（键名） | - | 逻辑标识，被 `sites[].panel_id` 引用 |
+| `url` | string | - | 宝塔面板基础 URL，需带端口，例如 `https://panel-hk.example.com:8888` |
+| `api_key` | string | `""` | 宝塔**接口密钥**。明文写法仅作兜底，强烈建议改用 `api_key_env` |
+| `api_key_env` | string | `""` | 运行时从该环境变量读取 api_key，**优先级高于** `api_key` 明文 |
+| `timeout_seconds` | int | `15` | 单次 HTTP 请求超时 |
+| `retries` | int | `2` | 仅对传输层临时错误生效；鉴权失败永不重试 |
+| `chunk_bytes` | int | `5242880` | 单次 ExecShell 拉取与单个 cron 周期的字节上限，默认 5 MB |
+| `verify_tls` | boolean | `true` | TLS 证书校验开关，仅自签证书场景下可设为 `false` |
+
+示例：
+
+```yaml
+remote_panels:
+  bt-prod-hk:
+    url: https://panel-hk.example.com:8888
+    api_key_env: BT_PANEL_HK_API_KEY     # 推荐写法
+    timeout_seconds: 15
+    retries: 2
+
+sites:
+  - domain: site-local.example.com
+    enabled: true
+    access_log: ./logs/site-local.access.log     # 本地站点，无需 panel_id
+    error_log: ./logs/site-local.error.log
+  - domain: site-remote.example.com
+    enabled: true
+    panel_id: bt-prod-hk                         # 远程站点，绑定面板
+    access_log: /www/wwwlogs/site-remote.example.com.log
+    error_log: /www/wwwlogs/site-remote.example.com.error.log
+```
+
+> ⚠️ **安全警告** — 宝塔面板的 `api_key` 拥有该面板纳管所有主机的最高权限，等同于 root。**请务必不要将含有 `api_key` 明文的 `config.yaml` 提交到任何版本控制系统（包括私有仓库）。** 推荐工作流：
+>
+> 1. 将 `config.yaml` 加入 `.gitignore`（项目默认已配置）。
+> 2. 通过 `api_key_env` 注入密钥，并在 `/etc/server-mate/env`、systemd 的 `EnvironmentFile=`、或企业密钥管理系统中维护实际值。
+> 3. 一旦发现密钥曾被误提交（即使是私有仓库或已强制推送删除），立即在宝塔面板侧轮换 / 撤销该密钥，**不要依赖 `git rm` 或重写历史**。
 
 ### `storage` 部分
 

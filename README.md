@@ -4,9 +4,9 @@ English | [Chinese](README_ZH.md)
 
 # Server-Mate | Lightweight Server Monitoring and AI Ops
 
-> A two-plane monitoring system for Linux hosts running Nginx or Apache.
+> A two-plane monitoring system for Linux hosts running Nginx or Apache, now with **lightweight centralized remote monitoring** via BT-Panel API — one Agent, many servers, no remote installation required.
 
-[![Version](https://img.shields.io/badge/version-1.3.3-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-1.3.4-blue.svg)]()
 [![OpenClaw](https://img.shields.io/badge/OpenClaw-Skill-success.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Platform-CentOS%2FUbuntu%2FDebian-lightgrey.svg)](https://linux.org)
@@ -19,12 +19,15 @@ English | [Chinese](README_ZH.md)
 
 **Server-Mate** is a lightweight server monitoring and AI operations workflow for Linux web hosts running Nginx or Apache.
 
+Starting in v1.3.4 it also operates as a **lightweight centralized remote monitoring** stack: deploy the Agent on a single management box and pull access / error logs from any number of remote hosts via the BT-Panel (Baota) HTTP API. There is no probe, daemon, or extra package to install on the target servers — and the existing parsing, AI diagnosis, alerting, and PDF report pipelines apply to remote sites without any additional wiring.
+
 It splits responsibilities into two planes:
-- **Server Agent**: a Python collector that tails logs, samples host metrics, and writes SQLite rollups
+- **Server Agent**: a Python collector that tails local logs (or pulls remote logs through BT-Panel), samples host metrics, and writes SQLite rollups
 - **AI Analyzer**: an OpenClaw-side layer that generates reports, pushes webhooks, explains issues, and drives guarded automation
 
 ### Key Features
 
+- **Centralized remote collection**: pull Nginx / Apache logs from many hosts through BT-Panel API — no agent, daemon, or extra package on the remote machines
 - **Real-time metrics**: CPU, memory, disk, load, and network I/O via `psutil`
 - **Log parsing**: normalized Nginx and Apache access/error log processing
 - **Traffic analytics**: PV, UV, IP count, QPS, bandwidth, and status-code breakdowns
@@ -43,6 +46,28 @@ It splits responsibilities into two planes:
 - Generate daily, weekly, and monthly ops reports automatically
 - Detect suspicious IPs, 404 scans, 5xx spikes, and SSH brute-force attempts
 - Enable safe automation with allowlists, TTLs, cooldowns, and audit trails
+
+---
+
+## What's New in v1.3.4
+
+### BT-Panel Remote Integration
+
+- **Agentless centralized monitoring**: Server-Mate now collects Nginx and Apache logs from any number of remote hosts through the BT-Panel (Baota) HTTP API. Operators no longer need to install, patch, or maintain a probe on each target server — a single Agent on the management host fans out to every configured panel
+- **Native multi-site reuse**: remote sites flow into the same `sites[]` matrix as local ones, so traffic rollups, spider classification, AI diagnosis, webhook routing, and PDF reports are reused as-is
+- **Explicit panel binding**: each site selects its data source via a `panel_id`; an empty `panel_id` keeps the legacy local-tail behaviour byte-for-byte compatible
+
+### Chunk-based Memory Protection
+
+- **Byte-offset incremental fetching**: remote reads are issued as `tail -c +<offset> | head -c <chunk>` over BT's `ExecShell` endpoint, so we never pull a full file body across the network
+- **5 MB single-cycle cap (Byte-offset chunking)**: each cron tick fetches at most `chunk_bytes` (default 5 MB). When a remote `error_log` explodes by hundreds of megabytes, network timeout and OOM are categorically prevented; the residual bytes roll over to subsequent cron ticks
+- **Backlog visibility**: a `backlog_bytes` field is stamped into the persisted cursor and an operator-facing warning is emitted whenever a site is falling behind real-time, so silent under-collection cannot occur
+
+### Production-Grade Security Guardrails
+
+- **Shell-injection defense**: every remote file path supplied by configuration is hardened with `shlex.quote` plus a structural check that rejects embedded NUL/CR/LF, before being spliced into any `ExecShell` command. A malicious `access_log` value such as `"/path; rm -rf /"` is contained inside a single-quoted shell literal and never executed
+- **NTP time-drift detection**: BT signature failures often surface as cryptic HTTP 200 + `{"status": false, "msg": "request_token error"}` payloads. The client now recognises both English and Chinese variants of the auth-failure message and emits a precise warning — *"Authentication failed. Please check if the time on the Agent server and the Remote BT panel are synchronized (NTP Time Drift)."* — so operators stop chasing the wrong root cause
+- **Defense-in-depth chunk cap**: the 5 MB ceiling is enforced both inside the Python caller AND on the remote shell pipeline (`head -c 5242880`), so a buggy panel response cannot blow past the bound
 
 ---
 
@@ -339,8 +364,52 @@ Add these lines:
 | `domain` | string | Site domain used for report naming and SSL checks |
 | `site_host` | string | Display name for the site |
 | `enabled` | boolean | Whether this site is enabled |
-| `access_log` | string | Access log path |
-| `error_log` | string | Error log path |
+| `access_log` | string | Access log path. Local path when `panel_id` is empty; **absolute remote path** on the target host when `panel_id` is set |
+| `error_log` | string | Error log path. Same semantics as `access_log` |
+| `panel_id` | string | *Optional.* Binds this site to a remote BT panel defined in `remote_panels`. Leave empty (or omit) to read local files via the original `LocalLogReader`. When set, logs are pulled through the bound panel via `BTRemoteLogReader` |
+
+### `remote_panels` Section *(new in 1.3.4)*
+
+A top-level mapping from `panel_id` to a BT-Panel connection profile. Sites reference these profiles via their `panel_id` field to enable agentless remote log collection.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `<panel_id>` | string (key) | - | Logical identifier referenced by `sites[].panel_id` |
+| `url` | string | - | BT-Panel base URL including port, e.g. `https://panel-hk.example.com:8888` |
+| `api_key` | string | `""` | BT-Panel **interface key**. Plaintext is supported as a fallback only; prefer `api_key_env` |
+| `api_key_env` | string | `""` | Environment variable to read the api_key from at runtime. Takes precedence over `api_key` |
+| `timeout_seconds` | int | `15` | Per-request HTTP timeout |
+| `retries` | int | `2` | Bounded retry count for transient transport errors. Auth failures are never retried |
+| `chunk_bytes` | int | `5242880` | Hard upper bound (in bytes) on a single ExecShell pull and a single cron-cycle fetch. Default is 5 MB |
+| `verify_tls` | boolean | `true` | TLS certificate verification toggle. Disable only for self-signed panels |
+
+Example:
+
+```yaml
+remote_panels:
+  bt-prod-hk:
+    url: https://panel-hk.example.com:8888
+    api_key_env: BT_PANEL_HK_API_KEY     # preferred
+    timeout_seconds: 15
+    retries: 2
+
+sites:
+  - domain: site-local.example.com
+    enabled: true
+    access_log: ./logs/site-local.access.log     # local site, no panel_id
+    error_log: ./logs/site-local.error.log
+  - domain: site-remote.example.com
+    enabled: true
+    panel_id: bt-prod-hk                         # remote site, bound to panel
+    access_log: /www/wwwlogs/site-remote.example.com.log
+    error_log: /www/wwwlogs/site-remote.example.com.error.log
+```
+
+> ⚠️ **Security Warning** — A BT-Panel `api_key` carries the same authority as root on every host the panel manages. **Never commit a `config.yaml` containing a plaintext `api_key` to version control.** The supported workflow is:
+>
+> 1. Add `config.yaml` to `.gitignore` (already the project default).
+> 2. Inject the key via `api_key_env` and export it from a non-tracked location such as `/etc/server-mate/env`, a systemd `EnvironmentFile=`, or your secrets manager.
+> 3. If a key is ever committed accidentally — even to a private fork — rotate it from the BT panel immediately; do not rely on `git rm`.
 
 ### `storage` Section
 
