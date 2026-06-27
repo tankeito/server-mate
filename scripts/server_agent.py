@@ -2470,6 +2470,11 @@ def render_alert_markdown(
         detail_lines.append(f"- 主要错误指纹: `{top_error}`")
     detail_lines.append(f"- 建议动作: {alert_suggestion(alert)}")
 
+    # Host-level alert kinds (cpu/mem/disk) always receive an empty access_summary,
+    # so showing "当前窗口请求数: 0" is misleading.  Only emit those lines for
+    # site-traffic alert kinds where the values are genuinely meaningful.
+    _HOST_LEVEL_KINDS = {"cpu_high", "memory_high", "disk_low"}
+    alert_kind = str(alert.get("kind") or "")
     lines = [
         f"# Server-Mate 告警 | {alert_label(alert)}",
         "",
@@ -2477,15 +2482,19 @@ def render_alert_markdown(
         f"- 主机: `{host_id}`",
         f"- 站点: `{site}`",
         f"- 触发时间: {timestamp_local}",
-        f"- 当前窗口请求数: {access_summary.get('total_requests', 0)}",
-        f"- 当前窗口错误数: {error_summary.get('total_errors', 0)}",
     ]
+    if alert_kind not in _HOST_LEVEL_KINDS:
+        lines.append(f"- 当前窗口请求数: {access_summary.get('total_requests', 0)}")
+        lines.append(f"- 当前窗口错误数: {error_summary.get('total_errors', 0)}")
     lines.extend(detail_lines)
     if ai_diagnosis and (ai_diagnosis.get("analysis") or ai_diagnosis.get("suggestion")):
+        # Indicate when the diagnosis came from the local fallback rather than a real LLM.
+        ai_source = ai_diagnosis.get("source", "")
+        ai_badge = " \u3010AI: 本地兜底\u3011" if ai_source == "simulated" else ""
         lines.extend(
             [
                 "",
-                "## 💡 AI 智能诊断",
+                f"## \U0001f4a1 AI 智能诊断{ai_badge}",
                 f"- 原因分析: {ai_diagnosis.get('analysis') or 'N/A'}",
                 f"- 行动建议: {ai_diagnosis.get('suggestion') or alert_suggestion(alert)}",
             ]

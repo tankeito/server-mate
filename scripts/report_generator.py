@@ -48,7 +48,7 @@ from server_agent import (
     load_config,
     resolve_sites,
 )
-from webhook_center import send_markdown_message
+from webhook_center import send_markdown_message, send_telegram_document_to_channels
 
 
 PDF_COLORS = {
@@ -8085,7 +8085,32 @@ def send_report_notice(
     else:
         lines.append(f"- {t(config, 'download_url')}: {t(config, 'local_only')}")
     lines.extend(["", f"> {t(config, 'report_note')}"])
-    return send_markdown_message(config, title, "\n".join(lines), selected_channels)
+
+    results: list[dict[str, Any]] = []
+
+    # For PDF reports: upload the file directly to Telegram via sendDocument so
+    # recipients receive the actual PDF instead of just a download link.
+    is_pdf = local_path.suffix.lower() == ".pdf" and local_path.exists()
+    if is_pdf:
+        pdf_caption = title[:1024]
+        tg_results = send_telegram_document_to_channels(
+            config,
+            file_path=str(local_path),
+            caption=pdf_caption,
+            channels=selected_channels,
+        )
+        results.extend(tg_results)
+
+    # Send the summary text notice to all channels (for PDF: skip telegram since
+    # it already received the document; for non-PDF: send to all channels).
+    if is_pdf:
+        non_tg_channels = [ch for ch in (selected_channels or []) if ch != "telegram"]
+        if non_tg_channels:
+            results.extend(send_markdown_message(config, title, "\n".join(lines), non_tg_channels))
+    else:
+        results.extend(send_markdown_message(config, title, "\n".join(lines), selected_channels))
+
+    return results
 
 
 def build_json_payload(report_kind: str, report: dict[str, Any], local_path: Path, exported_path: Path, public_url: str | None, delivery_results: list[dict[str, Any]] | None = None) -> dict[str, Any]:
