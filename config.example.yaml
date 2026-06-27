@@ -16,6 +16,14 @@ system_metrics:
   enabled: true
   disk_root: /
   collect_network_io: true
+  collect_processes: true       # Layer 2: proc count, zombie, top-5 CPU/mem procs
+  collect_tcp_states: true      # Layer 4: TCP ESTABLISHED / TIME_WAIT / CLOSE_WAIT
+  # Layer 4: systemd services to probe (empty = disable)
+  service_probes: []
+  # service_probes: [nginx, php8.3-fpm, mysql]
+  # Layer 3: extra mount points beyond disk_root (empty = disable)
+  extra_disk_partitions: []
+  # extra_disk_partitions: ["/data", "/home"]
 
 logs:
   # Leave empty to auto-detect /var/log/auth.log (Ubuntu/Debian)
@@ -79,6 +87,16 @@ thresholds:
   scan_404_distinct_uris: 10
   ssh_bruteforce_window_minutes: 5
   ssh_bruteforce_failures: 10
+  # Layer 1: CPU iowait, Swap, Memory absolute, Network errors, Disk IOPS
+  iowait_pct: 30.0             # CPU iowait > 30% triggers iowait_high
+  swap_pct: 60.0               # Swap usage > 60% triggers swap_high
+  memory_min_available_mb: 200 # available < 200MB triggers memory_critical
+  net_error_count: 100         # rx_errs+tx_errs+drops > 100 triggers net_errors
+  disk_write_iops: 5000.0      # write IOPS > 5000/s triggers high_iops
+  # Layer 3: inode
+  inode_used_pct: 90.0         # inode usage > 90% triggers inode_low
+  # Layer 4: TCP TIME_WAIT
+  tcp_timewait_count: 5000     # TIME_WAIT > 5000 triggers tcp_timewait_high
 
 storage:
   database_file: ./metrics.db

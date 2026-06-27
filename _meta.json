@@ -1,6 +1,6 @@
 {
   "name": "server-mate",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "description": "Lightweight, centralized server monitoring and AI operations workflow for Linux hosts running Nginx or Apache, with optional BT-Panel API integration for agentless remote log collection",
   "author": "tankeito",
   "license": "MIT",
@@ -30,7 +30,14 @@
     "apache",
     "log-analysis",
     "webhook-alerts",
-    "auto-remediation"
+    "auto-remediation",
+    "iowait",
+    "swap-monitoring",
+    "inode-monitoring",
+    "process-monitoring",
+    "tcp-states",
+    "disk-iops",
+    "systemd-service-probe"
   ],
   "platform": [
     "CentOS",
@@ -62,6 +69,11 @@
     "Production-grade security guardrails: shlex-based shell-injection defense, NTP time-drift detection on BT signature failures",
     "Multi-site matrix configuration with isolated per-domain rollups",
     "Real-time host metrics (CPU, memory, disk, network)",
+    "Extended Linux system metrics — Layer 1: CPU iowait/user/system, memory available, swap, disk IOPS deltas, network Mbps + error/drop counters",
+    "Extended Linux system metrics — Layer 2: process count, zombie detection, top-5 CPU and memory processes",
+    "Extended Linux system metrics — Layer 3: root inode usage, configurable extra partition monitoring",
+    "Extended Linux system metrics — Layer 4: TCP connection state breakdown (ESTABLISHED/TIME_WAIT/CLOSE_WAIT), systemd service health probes",
+    "10 new alert kinds: iowait_high, swap_high, memory_critical, net_errors, high_iops, zombie_process, inode_low, disk_multi_low, tcp_timewait_high, service_down",
     "Nginx/Apache access and error log parsing",
     "Traffic analysis (PV, UV, IP, QPS, bandwidth)",
     "Spider detection and traffic separation",
@@ -154,6 +166,6 @@
     "default_data_dir": "./data/"
   },
   "created_at": "2026-03-26",
-  "updated_at": "2026-04-26",
-  "release_channel": "1.4.x — Centralized Remote Monitoring"
+  "updated_at": "2026-06-27",
+  "release_channel": "1.5.x — Deep Linux Metrics Expansion"
 }

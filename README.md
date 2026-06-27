@@ -6,7 +6,7 @@ English | [Chinese](README_ZH.md)
 
 > A two-plane monitoring system for Linux hosts running Nginx or Apache, now with **lightweight centralized remote monitoring** via BT-Panel API — one Agent, many servers, no remote installation required.
 
-[![Version](https://img.shields.io/badge/version-1.4.1-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-1.5.0-blue.svg)]()
 [![OpenClaw](https://img.shields.io/badge/OpenClaw-Skill-success.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Platform-CentOS%2FUbuntu%2FDebian-lightgrey.svg)](https://linux.org)
@@ -19,7 +19,7 @@ English | [Chinese](README_ZH.md)
 
 **Server-Mate** is a lightweight server monitoring and AI operations workflow for Linux web hosts running Nginx or Apache.
 
-As of v1.4.x, Server-Mate has formally evolved into a **Centralized Remote Monitoring** architecture: a single Agent host can monitor an entire fleet by pulling logs through the BT-Panel (Baota) HTTP API. The integration is **non-intrusive by design** — the only requirement on a target server is that BT-Panel API access is enabled. No Python interpreter, no Server-Mate package, no probe, no daemon, and no log shipping agent ever needs to be installed on the monitored host. The existing parsing, AI diagnosis, alerting, and PDF report pipelines apply to remote sites with no additional wiring.
+As of v1.5.x, Server-Mate collects a **comprehensive Linux system metrics stack** across four layers — CPU detail, memory/swap, disk IOPS, network rates, process accounting, inode usage, TCP connection states, and systemd service health — all via `psutil` and the standard library with zero new dependencies. It also retains the v1.4.x **Centralized Remote Monitoring** architecture: a single Agent host can monitor an entire fleet by pulling logs through the BT-Panel (Baota) HTTP API with no remote installation required.
 
 It splits responsibilities into two planes:
 - **Server Agent**: a Python collector that tails local logs (or pulls remote logs through BT-Panel), samples host metrics, and writes SQLite rollups
@@ -29,10 +29,15 @@ It splits responsibilities into two planes:
 
 - **Centralized remote collection**: pull Nginx / Apache logs from many hosts through BT-Panel API — no agent, daemon, or extra package on the remote machines
 - **Real-time metrics**: CPU, memory, disk, load, and network I/O via `psutil`
+- **Extended Linux metrics — Layer 1**: CPU user/system/iowait; memory available; swap usage; per-cycle disk IOPS and network Mbps; NIC error and drop counters
+- **Extended Linux metrics — Layer 2**: process count, zombie detection, and top-5 CPU/memory process ranking
+- **Extended Linux metrics — Layer 3**: root-disk inode usage; configurable extra partition monitoring (e.g. `/data`, `/home`)
+- **Extended Linux metrics — Layer 4**: TCP connection state breakdown (ESTABLISHED / TIME_WAIT / CLOSE_WAIT); systemd service health probes
 - **Log parsing**: normalized Nginx and Apache access/error log processing
 - **Traffic analytics**: PV, UV, IP count, QPS, bandwidth, and status-code breakdowns
 - **Spider detection**: crawler-family recognition and traffic separation
 - **Smart alerts**: DingTalk, WeCom, Feishu, and Telegram webhook delivery
+- **10 new alert kinds**: `iowait_high`, `swap_high`, `memory_critical`, `net_errors`, `high_iops`, `zombie_process`, `inode_low`, `disk_multi_low`, `tcp_timewait_high`, `service_down`
 - **SSH Security Shield**: auth-log brute-force detection linked to auto-ban
 - **AI diagnosis**: plain-language explanations and remediation guidance
 - **Auto reports**: daily, weekly, and monthly PDF reports with AI commentary
@@ -46,6 +51,56 @@ It splits responsibilities into two planes:
 - Generate daily, weekly, and monthly ops reports automatically
 - Detect suspicious IPs, 404 scans, 5xx spikes, and SSH brute-force attempts
 - Enable safe automation with allowlists, TTLs, cooldowns, and audit trails
+
+---
+
+## What's New in v1.5.0
+
+### Deep Linux System Metrics — 4-Layer Expansion
+
+All new metrics are collected via `psutil` and the Python standard library. **Zero new dependencies** are required.
+
+**Layer 1 — CPU detail, memory/swap, disk IOPS & network rates**
+- `cpu_user_pct`, `cpu_system_pct`, `cpu_iowait_pct` from `cpu_times_percent()`
+- `memory_used_bytes`, `memory_available_bytes`, `swap_used_pct`, `swap_used_bytes`
+- Per-cycle delta IOPS: `disk_read_iops`, `disk_write_iops` (ops/s), `disk_read_bytes_delta`, `disk_write_bytes_delta`
+- `net_rx_mbps`, `net_tx_mbps`, `net_rx_errs`, `net_tx_errs`, `net_rx_drop`, `net_tx_drop`
+
+**Layer 2 — Process accounting**
+- `process_count`, `process_running`, `process_sleeping`, `process_zombie`
+- `top_cpu_procs` and `top_mem_procs`: top-5 processes by CPU and memory usage
+
+**Layer 3 — Inode & extra partition monitoring**
+- `disk_inode_used_pct`: inode saturation on the root mount via `os.statvfs()`
+- Configurable `extra_disk_partitions` list: per-mount `used_pct`, `free_bytes`, and `inode_used_pct`
+
+**Layer 4 — TCP states & systemd service health**
+- `tcp_established`, `tcp_time_wait`, `tcp_close_wait` via `psutil.net_connections(kind="tcp")`
+- Configurable `service_probes` list: checks each unit with `systemctl is-active` and returns `service_failed_units`
+
+### 10 New Alert Kinds
+
+| Alert kind | Trigger |
+|---|---|
+| `iowait_high` | CPU iowait > `iowait_pct` (default 30%) |
+| `swap_high` | Swap usage > `swap_pct` (default 60%) |
+| `memory_critical` | Available memory < `memory_min_available_mb` (default 200 MB) |
+| `net_errors` | NIC errors + drops > `net_error_count` (default 100) |
+| `high_iops` | Write IOPS > `disk_write_iops` (default 5 000/s) |
+| `zombie_process` | Any zombie process present |
+| `inode_low` | Inode usage > `inode_used_pct` (default 90%) |
+| `disk_multi_low` | Extra partition free ratio < `disk_free_ratio` |
+| `tcp_timewait_high` | TIME_WAIT connections > `tcp_timewait_count` (default 5 000) |
+| `service_down` | Any `service_probes` unit reports non-active |
+
+### Zero-Downtime Database Migration
+
+- `migrate_schema()` is called automatically from `init_database()` and adds 11 new `metric_rollups` columns to any existing database using `PRAGMA table_info` — **no manual migration needed**, no data loss.
+
+### Backwards-Compatible Configuration
+
+- Four new `system_metrics` keys (`collect_processes`, `collect_tcp_states`, `service_probes`, `extra_disk_partitions`) all default to safe values; existing `config.yaml` files work without changes.
+- Seven new threshold keys with sensible defaults: `iowait_pct`, `swap_pct`, `memory_min_available_mb`, `net_error_count`, `disk_write_iops`, `inode_used_pct`, `tcp_timewait_count`.
 
 ---
 

@@ -6,7 +6,7 @@
 
 > 面向运行 Nginx 或 Apache 的 Linux 主机的双平面监控系统，并通过宝塔（BT-Panel）API 提供**轻量级集中式远程监控**——一台 Agent，纳管多台服务器，目标主机零安装。
 
-[![Version](https://img.shields.io/badge/version-1.4.1-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-1.5.0-blue.svg)]()
 [![OpenClaw](https://img.shields.io/badge/OpenClaw-Skill-success.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Platform-CentOS%2FUbuntu%2FDebian-lightgrey.svg)](https://linux.org)
@@ -19,7 +19,7 @@
 
 **Server-Mate** 是一套面向 Linux Web 主机的轻量级服务器监控与 AI 运维工作流，适合运行 Nginx 或 Apache 的场景。
 
-自 v1.4.x 起，Server-Mate 正式演进为**中心化远程监控（Centralized Remote Monitoring）架构**：仅需在一台 Agent 主机部署本组件，即可通过宝塔（BT-Panel）API 监控整个服务器集群。该集成是**无感接入（non-intrusive）**的——目标服务器**无需安装任何 Python 依赖、无需运行任何 Server-Mate 包、无需常驻进程或日志投递探针**，**唯一前提仅是开启宝塔面板的 API 权限**。现有的解析、AI 诊断、告警与 PDF 报表管道对远程站点完全无缝复用。
+自 v1.5.x 起，Server-Mate 新增了**深度 Linux 系统指标采集**能力，覆盖四个层次：CPU 明细、内存/Swap、磁盘 IOPS、网络速率、进程统计、Inode 使用率、TCP 连接状态，以及 systemd 服务健康探测——全部通过 `psutil` 与标准库实现，**零新依赖**。同时完整保留 v1.4.x 的**中心化远程监控架构**：一台 Agent 通过宝塔 API 拉取多台服务器日志，目标主机零安装。
 
 它将职责拆分为两个平面：
 - **Server Agent**：运行在主机侧的 Python 采集器，负责本地日志增量读取（或通过宝塔 API 拉取远程日志）、主机指标采样与 SQLite 聚合落库
@@ -29,10 +29,15 @@
 
 - **集中式远程采集**：通过宝塔 API 远程拉取多主机的 Nginx / Apache 日志，目标机器零安装、零依赖
 - **实时指标采集**：通过 `psutil` 采集 CPU、内存、磁盘、负载、网络 I/O
+- **扩展 Linux 指标 — Layer 1**：CPU user/system/iowait；可用内存；Swap 使用率；单周期磁盘 IOPS 增量；网络 Mbps；NIC 错误包/丢包计数
+- **扩展 Linux 指标 — Layer 2**：进程总数、僵尸进程检测、Top-5 CPU/内存进程排行
+- **扩展 Linux 指标 — Layer 3**：根目录 Inode 使用率；可配置额外分区监控（如 `/data`、`/home`）
+- **扩展 Linux 指标 — Layer 4**：TCP 连接状态分布（ESTABLISHED / TIME_WAIT / CLOSE_WAIT）；systemd 服务健康探测
 - **日志解析**：标准化 Nginx / Apache 的访问日志与错误日志
 - **流量分析**：统计 PV、UV、IP 数、QPS、带宽、状态码分布
 - **蜘蛛识别**：识别常见爬虫家族并与普通访客流量分离
 - **智能告警**：支持钉钉、企业微信、飞书、Telegram 等 Webhook 通道
+- **10 种新告警类型**：`iowait_high`、`swap_high`、`memory_critical`、`net_errors`、`high_iops`、`zombie_process`、`inode_low`、`disk_multi_low`、`tcp_timewait_high`、`service_down`
 - **SSH 防暴破护盾**：增量解析认证日志，识别 SSH 爆破并可联动 auto-ban
 - **AI 诊断**：将异常转换成自然语言解释与排查建议
 - **自动报表**：生成日报、周报、月报 PDF，并附带 AI 点评
@@ -46,6 +51,56 @@
 - 自动化生成日报、周报和月报，掌握流量、性能和安全趋势
 - 识别可疑 IP、404 扫描、5xx 峰值和 SSH 暴破行为
 - 以白名单、TTL 和审计留痕为前提，安全启用自动化干预
+
+---
+
+## v1.5.0 新增内容
+
+### 深度 Linux 系统指标扩充 — 四层采集体系
+
+所有新指标均通过 `psutil` 与 Python 标准库实现，**零新依赖**。
+
+**Layer 1 — CPU 明细 / 内存与 Swap / 磁盘 IOPS / 网络速率**
+- `cpu_user_pct`、`cpu_system_pct`、`cpu_iowait_pct`（来自 `cpu_times_percent()`）
+- `memory_used_bytes`、`memory_available_bytes`、`swap_used_pct`、`swap_used_bytes`
+- 单周期 IOPS 增量：`disk_read_iops`、`disk_write_iops`（ops/s）、`disk_read_bytes_delta`、`disk_write_bytes_delta`
+- `net_rx_mbps`、`net_tx_mbps`、`net_rx_errs`、`net_tx_errs`、`net_rx_drop`、`net_tx_drop`
+
+**Layer 2 — 进程统计**
+- `process_count`、`process_running`、`process_sleeping`、`process_zombie`
+- `top_cpu_procs` 和 `top_mem_procs`：按 CPU / 内存占用排列的前 5 进程
+
+**Layer 3 — Inode 与额外分区**
+- `disk_inode_used_pct`：通过 `os.statvfs()` 采集根挂载点 Inode 饱和度
+- 可配置 `extra_disk_partitions` 列表：每个挂载点采集 `used_pct`、`free_bytes`、`inode_used_pct`
+
+**Layer 4 — TCP 连接状态 / systemd 服务健康**
+- `tcp_established`、`tcp_time_wait`、`tcp_close_wait`（来自 `psutil.net_connections(kind="tcp")`）
+- 可配置 `service_probes` 列表：通过 `systemctl is-active` 探测每个服务，返回 `service_failed_units`
+
+### 10 种新告警类型
+
+| 告警类型 | 触发条件 |
+|---|---|
+| `iowait_high` | CPU iowait > `iowait_pct`（默认 30%） |
+| `swap_high` | Swap 使用率 > `swap_pct`（默认 60%） |
+| `memory_critical` | 可用内存 < `memory_min_available_mb`（默认 200 MB） |
+| `net_errors` | NIC 错误包 + 丢包 > `net_error_count`（默认 100） |
+| `high_iops` | 写 IOPS > `disk_write_iops`（默认 5 000/s） |
+| `zombie_process` | 存在任意僵尸进程 |
+| `inode_low` | Inode 使用率 > `inode_used_pct`（默认 90%） |
+| `disk_multi_low` | 额外分区剩余比例 < `disk_free_ratio` |
+| `tcp_timewait_high` | TIME_WAIT 连接数 > `tcp_timewait_count`（默认 5 000） |
+| `service_down` | 任意 `service_probes` 服务状态为非 active |
+
+### 零停机数据库迁移
+
+- `migrate_schema()` 在 `init_database()` 启动时自动调用，通过 `PRAGMA table_info` 检查后，幂等地为 `metric_rollups` 表新增 11 列——**无需手动迁移，不丢失任何数据**。
+
+### 向后兼容配置
+
+- 4 个新 `system_metrics` 配置项（`collect_processes`、`collect_tcp_states`、`service_probes`、`extra_disk_partitions`）均具备默认安全值，**已有 `config.yaml` 无需改动**即可升级。
+- 7 个新告警阈值（`iowait_pct`、`swap_pct`、`memory_min_available_mb`、`net_error_count`、`disk_write_iops`、`inode_used_pct`、`tcp_timewait_count`）均已内置合理默认值。
 
 ---
 

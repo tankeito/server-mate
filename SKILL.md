@@ -1,6 +1,6 @@
 ---
 name: server-mate
-version: 1.4.1
+version: 1.5.0
 description: Build or extend a lightweight server monitoring and AI operations workflow for Linux hosts running Nginx or Apache, with optional centralized remote monitoring through the BT-Panel (Baota) HTTP API. Use when Codex needs to collect psutil metrics, parse access, error, or auth logs (locally OR pulled remotely from BT panels with no probe on the target host), design JSON payloads or APIs, add webhook alerts, generate PDF ops reports with SSL expiry summaries, answer natural-language monitoring questions, or implement guarded auto-ban and auto-heal behaviors.
 homepage: https://github.com/tankeito/server-mate
 metadata:
@@ -15,7 +15,7 @@ metadata:
 
 # Server Mate
 
-Version: `1.4.1`
+Version: `1.5.0`
 
 Use this skill to design or implement a two-plane monitoring system:
 - a Python agent that tails local logs OR pulls remote logs through the BT-Panel HTTP API (centralized, agentless), and samples host metrics
@@ -121,6 +121,20 @@ Use external scheduling for production unless the user explicitly wants an alway
   - Weekly PDF push every Monday at `01:10`.
   - Monthly PDF push on day `1` at `01:20`.
 - In multi-site mode, a single scheduled `report_generator.py` run should iterate over every configured site unless the user explicitly passes `--site`.
+
+## Release notes for 1.5.0
+
+- **Deep Linux System Metrics — 4-Layer Expansion**: `collect_system_snapshot()` now collects 28+ metrics across four layers, all via `psutil` + standard library (zero new dependencies).
+  - **Layer 1 — CPU detail, memory/swap, disk IOPS, network rate**: `cpu_user_pct`, `cpu_system_pct`, `cpu_iowait_pct`; `swap_used_pct`, `swap_used_bytes`, `memory_used_bytes`, `memory_available_bytes`; per-cycle delta `disk_read_iops`, `disk_write_iops`, `disk_read_bytes_delta`, `disk_write_bytes_delta`; `net_rx_mbps`, `net_tx_mbps`, `net_rx_errs`, `net_tx_errs`, `net_rx_drop`, `net_tx_drop`.
+  - **Layer 2 — Process accounting**: `process_count`, `process_running`, `process_sleeping`, `process_zombie`; `top_cpu_procs` and `top_mem_procs` (top 5 each).
+  - **Layer 3 — Inode & extra partitions**: `disk_inode_used_pct` on root; configurable `extra_disk_partitions` list with per-mount `used_pct`, `free_bytes`, and `inode_used_pct`.
+  - **Layer 4 — TCP states & systemd service health**: `tcp_established`, `tcp_time_wait`, `tcp_close_wait` from `psutil.net_connections`; configurable `service_probes` list checked via `systemctl is-active` (returns `service_failed_units`).
+- **Delta I/O tracking via `_io_state`**: a mutable dict passed through `run_cycle` → `collect_system_snapshot` persists previous counter values across calls, enabling accurate per-cycle rate metrics without a resident process.
+- **10 new alert kinds** in `evaluate_alerts()`: `iowait_high`, `swap_high`, `memory_critical`, `net_errors`, `high_iops`, `zombie_process`, `inode_low`, `disk_multi_low`, `tcp_timewait_high`, `service_down` — each with a dedicated label, remediation suggestion, and detail block in `render_alert_markdown()`.
+- **7 new threshold keys** in `config.yaml` / `normalize_config()`: `iowait_pct` (30%), `swap_pct` (60%), `memory_min_available_mb` (200 MB), `net_error_count` (100), `disk_write_iops` (5 000/s), `inode_used_pct` (90%), `tcp_timewait_count` (5 000).
+- **4 new `system_metrics` config options**: `collect_processes`, `collect_tcp_states`, `service_probes`, `extra_disk_partitions` — all default-safe and backwards compatible.
+- **Zero-downtime DB migration**: `migrate_schema()` is called from `init_database()` and idempotently `ALTER TABLE metric_rollups ADD COLUMN` for all 11 new columns using `PRAGMA table_info` — existing databases are upgraded in-place without data loss.
+- **11 new `metric_rollups` columns**: `avg_cpu_iowait_pct`, `avg_swap_used_pct`, `avg_net_rx_mbps`, `avg_net_tx_mbps`, `avg_disk_read_iops`, `avg_disk_write_iops`, `max_process_count`, `max_zombie_count`, `min_inode_free_pct`, `avg_tcp_established`, `max_tcp_timewait` — all persisted through `upsert_metric_rollup()`.
 
 ## Release notes for 1.4.1
 
