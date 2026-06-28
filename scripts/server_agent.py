@@ -724,6 +724,7 @@ def build_site_runtime_config(config: dict[str, Any], site: dict[str, Any]) -> d
     runtime_config["agent"]["site_host"] = str(
         site.get("site_host") or runtime_config["agent"]["site"]
     )
+    runtime_config["agent"]["panel_id"] = str(site.get("panel_id") or "").strip()
     runtime_config["logs"]["access_log"] = str(site.get("access_log") or runtime_config["logs"].get("access_log") or "")
     runtime_config["logs"]["error_log"] = str(site.get("error_log") or runtime_config["logs"].get("error_log") or "")
     return runtime_config
@@ -1076,6 +1077,15 @@ def normalize_config(config: dict[str, Any], config_path: Path) -> dict[str, Any
         ]
     ) + 10
     agent["retention_minutes"] = max(agent["retention_minutes"], minimum_retention)
+
+    # Normalize diagnostics configuration
+    diag = config.setdefault("diagnostics", {})
+    diag["enabled"] = bool(diag.get("enabled", True))
+    diag["timeout_seconds"] = max(int(diag.get("timeout_seconds", 5)), 1)
+    diag["max_lines_per_command"] = max(int(diag.get("max_lines_per_command", 20)), 1)
+    diag["recovery_notification"] = bool(diag.get("recovery_notification", True))
+    diag["recovery_min_duration_seconds"] = max(int(diag.get("recovery_min_duration_seconds", 30)), 0)
+
     return config
 
 
@@ -2913,6 +2923,332 @@ def render_alert_markdown(
     return "\n".join(lines)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Post-Alert Deep Diagnostics
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _run_cmd_safe(
+    cmd: str,
+    timeout: int = 5,
+    max_lines: int = 20,
+    max_chars: int = 2000,
+) -> str:
+    """Run a shell command, return stdout capped at max_lines / max_chars.
+
+    Never raises — exceptions are caught and returned as an error string.
+    """
+    try:
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        out = (result.stdout or "").strip()
+        if not out and result.stderr:
+            out = result.stderr.strip()
+        lines = out.splitlines()
+        if len(lines) > max_lines:
+            out = "\n".join(lines[:max_lines]) + f"\n…(+{len(lines) - max_lines} lines)"
+        if len(out) > max_chars:
+            out = out[:max_chars] + "…"
+        return out or "(empty output)"
+    except subprocess.TimeoutExpired:
+        return "(command timed out)"
+    except Exception as exc:
+        return f"(error: {exc})"
+
+
+# Diagnostic command sets per alert kind.
+# Each entry is (label, command_template).
+# {unit} is substituted for service_down alerts.
+_DIAG_COMMANDS: dict[str, list[tuple[str, str]]] = {
+    "cpu_high": [
+        ("TOP CPU 进程", "ps aux --sort=-%cpu --no-headers | head -8"),
+        ("负载均值",     "uptime"),
+        ("连接数",       "ss -s 2>/dev/null || netstat -s 2>/dev/null | head -5"),
+    ],
+    "iowait_high": [
+        ("I/O 等待进程", "ps aux --sort=-%cpu --no-headers | head -8"),
+        ("磁盘 I/O 统计", "iostat -xz 1 2 2>/dev/null | tail -20 || cat /proc/diskstats | head -10"),
+        ("I/O 热点",      "iotop -b -n 1 --delay=1 2>/dev/null | head -10 || echo 'iotop not available'"),
+    ],
+    "high_iops": [
+        ("磁盘 I/O 统计", "iostat -xz 1 2 2>/dev/null | tail -20 || cat /proc/diskstats | head -10"),
+        ("高写入进程",    "ps aux --sort=-%cpu --no-headers | head -8"),
+    ],
+    "memory_high": [
+        ("内存使用",      "free -h"),
+        ("TOP 内存进程",  "ps aux --sort=-%mem --no-headers | head -8"),
+    ],
+    "memory_critical": [
+        ("内存使用",      "free -h"),
+        ("TOP 内存进程",  "ps aux --sort=-%mem --no-headers | head -10"),
+        ("OOM 日志",      "dmesg --ctime 2>/dev/null | grep -i 'oom\\|killed' | tail -5 || journalctl -k --no-pager -n 5 2>/dev/null | grep -i oom || echo 'no oom log'"),
+    ],
+    "swap_high": [
+        ("Swap 统计",     "free -h"),
+        ("高内存进程",    "ps aux --sort=-%mem --no-headers | head -8"),
+        ("Swap 配置",     "swapon --show 2>/dev/null || cat /proc/swaps"),
+    ],
+    "disk_low": [
+        ("磁盘用量",      "df -hT"),
+        ("大目录扫描",    "du -sh /* 2>/dev/null | sort -rh | head -8"),
+    ],
+    "disk_multi_low": [
+        ("磁盘用量",      "df -hT"),
+        ("大目录扫描",    "du -sh /* 2>/dev/null | sort -rh | head -8"),
+    ],
+    "inode_low": [
+        ("Inode 用量",    "df -i"),
+        ("小文件堆积",    "find /tmp /var/tmp /var/log -maxdepth 3 -type f 2>/dev/null | wc -l"),
+    ],
+    "net_errors": [
+        ("网卡统计",      "ip -s link 2>/dev/null || netstat -i"),
+        ("网卡详情",      "cat /proc/net/dev"),
+    ],
+    "zombie_process": [
+        ("僵尸进程列表",  "ps aux | awk '$8==\"Z\" {print}' | head -10"),
+        ("父进程信息",    "ps aux | awk '$8==\"Z\" {print $3}' | sort -u | xargs -I{} ps -p {} --no-headers 2>/dev/null | head -5 || echo 'n/a'"),
+    ],
+    "tcp_timewait_high": [
+        ("TCP 状态汇总",  "ss -s"),
+        ("TIME_WAIT 数",  "ss -tn state time-wait 2>/dev/null | wc -l || netstat -an | grep TIME_WAIT | wc -l"),
+    ],
+    "service_down": [
+        ("服务状态",      "systemctl status {unit} --no-pager -l 2>/dev/null | tail -20 || echo 'systemctl unavailable'"),
+        ("近期日志",      "journalctl -u {unit} --no-pager -n 20 2>/dev/null || echo 'journalctl unavailable'"),
+    ],
+    # site-traffic kinds — pull from access/error summary, no shell needed
+    "server_error_burst":    [],
+    "suspicious_ip_burst":   [],
+    "scan_or_route_breakage":[],
+    "latency_degradation":   [],
+    "php_entrypoint_error":  [],
+}
+
+
+def run_alert_diagnostics(
+    alert: dict[str, Any],
+    config: dict[str, Any],
+    panel_id: str = "",
+    panel_registry: dict[str, Any] | None = None,
+) -> str:
+    """Execute lightweight diagnostic commands for the given alert kind.
+
+    For local hosts, commands run via subprocess.
+    For BT-Panel remote hosts, commands are issued via exec_shell.
+    Returns a markdown-formatted string to append to the alert message,
+    or an empty string when diagnostics are disabled or unavailable.
+    """
+    diag_cfg = config.get("diagnostics", {})
+    if not diag_cfg.get("enabled", True):
+        return ""
+
+    kind = str(alert.get("kind") or "")
+    commands = _DIAG_COMMANDS.get(kind, [])
+    if not commands:
+        return ""
+
+    timeout   = max(int(diag_cfg.get("timeout_seconds", 5)), 1)
+    max_lines = max(int(diag_cfg.get("max_lines_per_command", 20)), 1)
+
+    # Substitute {unit} for service_down alerts
+    failed_units = alert.get("units") or []
+    unit_str = failed_units[0] if failed_units else "unknown.service"
+
+    lines: list[str] = ["", "## 🔍 自动诊断结果（触发时刻）", ""]
+
+    if panel_id and panel_registry:
+        # Remote BT-Panel path
+        client = (panel_registry or {}).get(panel_id)
+        if client is None:
+            lines.append("_（远程面板客户端不可用，跳过自动诊断）_")
+            return "\n".join(lines)
+        for label, cmd_template in commands:
+            cmd = cmd_template.replace("{unit}", unit_str)
+            try:
+                stdout = client.exec_shell(cmd)
+                out = (stdout or "").strip()
+                if not out:
+                    out = "(empty output)"
+                out_lines = out.splitlines()
+                if len(out_lines) > max_lines:
+                    out = "\n".join(out_lines[:max_lines]) + f"\n…(+{len(out_lines) - max_lines} lines)"
+            except Exception as exc:
+                out = f"(error: {exc})"
+            lines.append(f"**{label}**")
+            lines.append(f"```\n{out}\n```")
+    else:
+        # Local subprocess path
+        for label, cmd_template in commands:
+            cmd = cmd_template.replace("{unit}", unit_str)
+            out = _run_cmd_safe(cmd, timeout=timeout, max_lines=max_lines)
+            lines.append(f"**{label}**")
+            lines.append(f"```\n{out}\n```")
+
+    return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Alert Recovery Tracking
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _alert_state_key(alert: dict[str, Any], site: str) -> str:
+    """Stable key for alert_active_states dict: '<kind>::<site>'."""
+    return f"{alert.get('kind', 'unknown')}::{site}"
+
+
+def track_alert_recovery(
+    state: dict[str, Any],
+    current_alerts: list[dict[str, Any]],
+    site: str,
+    now: dt.datetime,
+    min_duration_seconds: int = 30,
+) -> list[dict[str, Any]]:
+    """Update alert_active_states and return a list of recovery alert dicts.
+
+    Call this *after* evaluate_alerts() each cycle:
+    1. Upsert every currently-firing alert into ``alert_active_states``.
+    2. For every previously-active alert that is no longer firing,
+       emit a recovery dict and remove it from active state.
+
+    A recovery is only emitted when the alert was active for at least
+    ``min_duration_seconds`` — avoids noise from single-cycle spikes.
+    """
+    active_states: dict[str, Any] = state.setdefault("alert_active_states", {})
+    current_keys = {_alert_state_key(a, site) for a in current_alerts}
+
+    # 1. Upsert currently-firing alerts
+    for alert in current_alerts:
+        key = _alert_state_key(alert, site)
+        if key not in active_states:
+            active_states[key] = {
+                "kind":      alert.get("kind"),
+                "site":      site,
+                "severity":  alert.get("severity", "warning"),
+                "fired_at":  now.isoformat(),
+                "peak_value": alert.get("value") or alert.get("count"),
+                "notified":  False,
+            }
+        else:
+            # Update peak value
+            new_val = alert.get("value") or alert.get("count")
+            if new_val is not None:
+                old_val = active_states[key].get("peak_value")
+                if old_val is None or (isinstance(new_val, (int, float)) and new_val > old_val):
+                    active_states[key]["peak_value"] = new_val
+
+    # 2. Detect recovered alerts
+    recoveries: list[dict[str, Any]] = []
+    recovered_keys: list[str] = []
+    for key, entry in active_states.items():
+        if key in current_keys:
+            continue  # still firing
+        fired_at = parse_iso_ts(entry.get("fired_at"))
+        if fired_at is None:
+            recovered_keys.append(key)
+            continue
+        duration_s = (now - fired_at).total_seconds()
+        if duration_s < min_duration_seconds:
+            # Too short — drop silently (transient spike)
+            recovered_keys.append(key)
+            continue
+        recoveries.append({
+            "kind":      entry.get("kind"),
+            "site":      entry.get("site"),
+            "severity":  entry.get("severity", "warning"),
+            "fired_at":  entry.get("fired_at"),
+            "recovered_at": now.isoformat(),
+            "duration_seconds": int(duration_s),
+            "peak_value": entry.get("peak_value"),
+            "is_recovery": True,
+        })
+        recovered_keys.append(key)
+
+    for key in recovered_keys:
+        active_states.pop(key, None)
+
+    return recoveries
+
+
+def _fmt_duration(seconds: int) -> str:
+    """Format integer seconds as human-readable '2 分 34 秒' string."""
+    if seconds < 60:
+        return f"{seconds} 秒"
+    m, s = divmod(seconds, 60)
+    if m < 60:
+        return f"{m} 分 {s} 秒" if s else f"{m} 分钟"
+    h, m = divmod(m, 60)
+    return f"{h} 小时 {m} 分钟"
+
+
+def render_recovery_markdown(
+    config: dict[str, Any],
+    recovery: dict[str, Any],
+    generated_at: dt.datetime,
+) -> str:
+    """Build a ✅ recovery notification markdown string."""
+    site      = alert_display_site(config)
+    host_id   = config["agent"]["host_id"]
+    timezone  = get_timezone(config)
+    ts_local  = generated_at.astimezone(timezone).isoformat()
+    fired_ts  = parse_iso_ts(recovery.get("fired_at"))
+    fired_local = fired_ts.astimezone(timezone).isoformat() if fired_ts else "unknown"
+    duration  = _fmt_duration(int(recovery.get("duration_seconds") or 0))
+    kind      = recovery.get("kind", "unknown")
+    label     = alert_label({"kind": kind})  # reuse existing label map
+    peak      = recovery.get("peak_value")
+    peak_str  = f"{peak}" if peak is not None else "—"
+
+    lines = [
+        f"# ✅ Server-Mate 已恢复 | {site} | {label}",
+        "",
+        f"- 恢复时间: {ts_local}",
+        f"- 告警触发: {fired_local}",
+        f"- 持续时长: 约 {duration}",
+        f"- 主机: `{host_id}`",
+        f"- 站点: `{site}`",
+        f"- 峰值: {peak_str}",
+        "",
+        f"> 该告警已自动解除，当前指标恢复正常。",
+    ]
+    return "\n".join(lines)
+
+
+def deliver_recovery_alerts(
+    config: dict[str, Any],
+    state: dict[str, Any],
+    generated_at: dt.datetime,
+    recoveries: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Push recovery notifications through the same webhook channels as alerts."""
+    alerts_config = config.get("notifications", {}).get("alerts", {})
+    if not alerts_config.get("enabled", True):
+        return []
+    if not config.get("diagnostics", {}).get("recovery_notification", True):
+        return []
+
+    channels = alerts_config.get("channels", [])
+    results: list[dict[str, Any]] = []
+
+    for recovery in recoveries:
+        kind  = str(recovery.get("kind") or "unknown")
+        label = alert_label({"kind": kind})
+        title = f"✅ Server-Mate 已恢复 | {alert_display_site(config)} | {label}"
+        markdown = render_recovery_markdown(config, recovery, generated_at)
+        channel_results = send_markdown_message(config, title, markdown, channels)
+        success = any(r.get("success") for r in channel_results)
+        results.append({
+            "kind":     kind,
+            "is_recovery": True,
+            "success":  success,
+            "channels": channel_results,
+        })
+    return results
+
+
 def deliver_alerts(
     config: dict[str, Any],
     state: dict[str, Any],
@@ -2921,6 +3257,7 @@ def deliver_alerts(
     system_snapshot: dict[str, Any],
     access_summary: dict[str, Any],
     error_summary: dict[str, Any],
+    panel_registry: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     alerts_config = config.get("notifications", {}).get("alerts", {})
     if not alerts_config.get("enabled", True):
@@ -2970,6 +3307,13 @@ def deliver_alerts(
             error_summary,
             ai_diagnosis,
         )
+
+        # Run auto-diagnostics
+        panel_id = config.get("agent", {}).get("panel_id", "")
+        diag_output = run_alert_diagnostics(alert, config, panel_id=panel_id, panel_registry=panel_registry)
+        if diag_output:
+            markdown += diag_output
+
         channel_results = send_markdown_message(config, title, markdown, channels)
         success = any(result.get("success") for result in channel_results)
         if success:
@@ -4351,6 +4695,12 @@ def run_cycle(
         host_access_summary,
         host_error_summary,
     )
+    # Track host-level alert recoveries
+    diag_cfg = config.get("diagnostics", {})
+    min_dur = diag_cfg.get("recovery_min_duration_seconds", 30)
+    host_recoveries = track_alert_recovery(state, host_alerts, HOST_METRIC_SITE, now, min_duration_seconds=min_dur)
+    host_recovery_deliveries = deliver_recovery_alerts(host_security_config, state, now, host_recoveries)
+    host_alert_deliveries.extend(host_recovery_deliveries)
     host_automation_actions = run_guarded_automation(
         connection,
         host_security_config,
@@ -4385,7 +4735,14 @@ def run_cycle(
             system_snapshot,
             access_summary,
             error_summary,
+            panel_registry=panel_registry,
         )
+        # Track site-level alert recoveries
+        diag_cfg = config.get("diagnostics", {})
+        min_dur = diag_cfg.get("recovery_min_duration_seconds", 30)
+        recoveries = track_alert_recovery(state, alerts, domain, now, min_duration_seconds=min_dur)
+        recovery_deliveries = deliver_recovery_alerts(site_config, state, now, recoveries)
+        alert_deliveries.extend(recovery_deliveries)
         site_result["traffic"] = access_summary
         site_result["errors"] = error_summary
         site_result["alerts"] = alerts

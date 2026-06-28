@@ -1,6 +1,6 @@
 ---
 name: server-mate
-version: 1.5.0
+version: 1.5.1
 description: Build or extend a lightweight server monitoring and AI operations workflow for Linux hosts running Nginx or Apache, with optional centralized remote monitoring through the BT-Panel (Baota) HTTP API. Use when Codex needs to collect psutil metrics, parse access, error, or auth logs (locally OR pulled remotely from BT panels with no probe on the target host), design JSON payloads or APIs, add webhook alerts, generate PDF ops reports with SSL expiry summaries, answer natural-language monitoring questions, or implement guarded auto-ban and auto-heal behaviors.
 homepage: https://github.com/tankeito/server-mate
 metadata:
@@ -15,7 +15,7 @@ metadata:
 
 # Server Mate
 
-Version: `1.5.0`
+Version: `1.5.1`
 
 Use this skill to design or implement a two-plane monitoring system:
 - a Python agent that tails local logs OR pulls remote logs through the BT-Panel HTTP API (centralized, agentless), and samples host metrics
@@ -121,6 +121,12 @@ Use external scheduling for production unless the user explicitly wants an alway
   - Weekly PDF push every Monday at `01:10`.
   - Monthly PDF push on day `1` at `01:20`.
 - In multi-site mode, a single scheduled `report_generator.py` run should iterate over every configured site unless the user explicitly passes `--site`.
+
+## Release notes for 1.5.1
+
+- **Post-Alert Automatic Diagnostics**: Added `run_alert_diagnostics()` which triggers diagnostic shell commands (e.g., `ps`, `uptime`, `ss`, `free`, `dmesg`, `df`, `systemctl status`) when hardware/service alerts fire, appending commands output directly to webhooks.
+- **Alert Recovery Notifications**: Added `track_alert_recovery()` and `deliver_recovery_alerts()` to track currently firing alerts in state and notify webhooks when resolved (e.g. ✅ Server-Mate 已恢复), including human-readable duration statistics and peak values.
+- **Diagnostics Configuration**: Added configurable settings under `diagnostics` section (`enabled`, `timeout_seconds`, `max_lines_per_command`, `recovery_notification`, `recovery_min_duration_seconds`).
 
 ## Release notes for 1.5.0
 

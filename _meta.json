@@ -1,6 +1,6 @@
 {
   "name": "server-mate",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Lightweight, centralized server monitoring and AI operations workflow for Linux hosts running Nginx or Apache, with optional BT-Panel API integration for agentless remote log collection",
   "author": "tankeito",
   "license": "MIT",
@@ -74,6 +74,8 @@
     "Extended Linux system metrics — Layer 3: root inode usage, configurable extra partition monitoring",
     "Extended Linux system metrics — Layer 4: TCP connection state breakdown (ESTABLISHED/TIME_WAIT/CLOSE_WAIT), systemd service health probes",
     "10 new alert kinds: iowait_high, swap_high, memory_critical, net_errors, high_iops, zombie_process, inode_low, disk_multi_low, tcp_timewait_high, service_down",
+    "Post-alert automatic deep diagnostics (ps, ss, df, iostat, dmesg, systemctl status) locally or remotely via BT API, appended to alerts",
+    "Alert recovery tracking and notifications with human-readable duration stats (e.g. 2 分 34 秒) and peak values",
     "Nginx/Apache access and error log parsing",
     "Traffic analysis (PV, UV, IP, QPS, bandwidth)",
     "Spider detection and traffic separation",
@@ -166,6 +168,6 @@
     "default_data_dir": "./data/"
   },
   "created_at": "2026-03-26",
-  "updated_at": "2026-06-27",
-  "release_channel": "1.5.x — Deep Linux Metrics Expansion"
+  "updated_at": "2026-06-28",
+  "release_channel": "1.5.x — Deep Linux Metrics & Auto-Diagnostics"
 }

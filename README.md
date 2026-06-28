@@ -6,7 +6,7 @@ English | [Chinese](README_ZH.md)
 
 > A two-plane monitoring system for Linux hosts running Nginx or Apache, now with **lightweight centralized remote monitoring** via BT-Panel API — one Agent, many servers, no remote installation required.
 
-[![Version](https://img.shields.io/badge/version-1.5.0-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-1.5.1-blue.svg)]()
 [![OpenClaw](https://img.shields.io/badge/OpenClaw-Skill-success.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Platform-CentOS%2FUbuntu%2FDebian-lightgrey.svg)](https://linux.org)
@@ -51,6 +51,25 @@ It splits responsibilities into two planes:
 - Generate daily, weekly, and monthly ops reports automatically
 - Detect suspicious IPs, 404 scans, 5xx spikes, and SSH brute-force attempts
 - Enable safe automation with allowlists, TTLs, cooldowns, and audit trails
+
+---
+
+## What's New in v1.5.1
+
+### Post-Alert Automatic Deep Diagnostics
+
+When hardware or service alerts trigger, the Agent automatically executes a suite of relevant troubleshooting commands locally (via subprocess) or remotely (via BT-Panel API `exec_shell`). The diagnostic report is appended directly to the webhook alert push message:
+- **CPU/Memory/Swap alerts**: runs `ps` sorted by usage, `uptime`, `free`, and `dmesg/journalctl` OOM filters.
+- **Disk/Inode alerts**: runs `df -hT`, `df -i`, and directory scans `du -sh` to locate major space/inode consumers.
+- **Network/TCP alerts**: runs `ss -s`, `ss -tn state time-wait`, `ip -s link`.
+- **Service down alerts**: runs `systemctl status <unit>` and `journalctl -u <unit>` logs.
+
+### Alert Recovery Notifications
+
+Track active alerts in state and notify webhooks when resolved (e.g. `✅ Server-Mate 已恢复`), complete with:
+- **Duration stats**: calculates exactly how long the incident lasted (e.g. `持续时长: 约 2 分 34 秒`).
+- **Peak values**: displays the highest metric value reached during the incident.
+- **Jitter mitigation**: a minimum duration setting (`recovery_min_duration_seconds`, default 30s) prevents noise from fast-jittering transient spikes.
 
 ---
 

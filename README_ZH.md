@@ -6,7 +6,7 @@
 
 > 面向运行 Nginx 或 Apache 的 Linux 主机的双平面监控系统，并通过宝塔（BT-Panel）API 提供**轻量级集中式远程监控**——一台 Agent，纳管多台服务器，目标主机零安装。
 
-[![Version](https://img.shields.io/badge/version-1.5.0-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-1.5.1-blue.svg)]()
 [![OpenClaw](https://img.shields.io/badge/OpenClaw-Skill-success.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Platform-CentOS%2FUbuntu%2FDebian-lightgrey.svg)](https://linux.org)
@@ -51,6 +51,25 @@
 - 自动化生成日报、周报和月报，掌握流量、性能和安全趋势
 - 识别可疑 IP、404 扫描、5xx 峰值和 SSH 暴破行为
 - 以白名单、TTL 和审计留痕为前提，安全启用自动化干预
+
+---
+
+## v1.5.1 新增内容
+
+### 告警触发后自动深度自查（Post-Alert Automatic Deep Diagnostics）
+
+当硬件或系统服务触发告警时，Agent 会在本地（使用 subprocess）或远程（使用宝塔 API `exec_shell`）自动执行一套针对性诊断命令，直接将排查结果追加到 Webhook 推送的 Markdown 消息底部：
+- **CPU / 内存 / Swap 告警**：自动列出 CPU 占用最高的前 8 个进程、系统负载（uptime）、内存使用分布（free -h），以及近期内核 OOM 事件日志（dmesg）。
+- **磁盘 / Inode 告警**：自动列出磁盘分区占用（df -hT/df -i）、自动扫描大文件夹目录用量（du -sh），快速定位空间爆满元凶。
+- **网络 / TCP 告警**：自动输出网卡统计（ip -s link）与 TCP 状态连接数汇总（ss -s）。
+- **系统服务故障（service_down）**：自动抓取指定服务的状态（systemctl status）与最近 20 行运行日志（journalctl -u）。
+
+### 告警自动恢复通知（Alert Recovery Notifications）
+
+支持持久化追踪活动告警的状态，当监控指标恢复正常时自动向 Webhook 推送 ✅ 恢复通知：
+- **持续时长统计**：精确计算并展示故障持续的分钟和秒数（例如 `持续时长: 约 2 分 34 秒`）。
+- **峰值展示**：记录并报告告警发生期间指标达到的最高值（例如 CPU 达到的最高百分比）。
+- **去抖动设计**：通过 `recovery_min_duration_seconds` 配置参数限制（默认 30 秒内自动恢复的瞬时波动不发恢复通知），避免服务器指标短暂瞬间越线带来无谓的推送打扰。
 
 ---
 

@@ -102,6 +102,13 @@ storage:
   database_file: ./metrics.db
   rollup_minutes: [10, 60]
 
+diagnostics:
+  enabled: true                       # 告警触发时，是否在服务器自动执行诊断命令（如 ps, ss, df 等）
+  timeout_seconds: 5                  # 单个诊断命令最大执行超时时间（秒）
+  max_lines_per_command: 20           # 每个诊断命令输出的最大行数限制，防止推送过长
+  recovery_notification: true         # 告警指标恢复正常后，是否发送“已恢复”通知
+  recovery_min_duration_seconds: 30   # 告警持续时间超过该门槛（秒）才发恢复通知，避免指标瞬间抖动造成打扰
+
 notifications:
   webhooks:
     dingtalk:
