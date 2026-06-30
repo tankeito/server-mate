@@ -5365,7 +5365,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         
         /* Table scroll wrappers */
         .table-wrapper { overflow-x: auto; width: 100%; max-width: 100%; -webkit-overflow-scrolling: touch; }
-        table { width: 100%; border-collapse: collapse; text-align: left; min-width: 600px; }
+        table { width: 100%; border-collapse: collapse; text-align: left; }
+        .wide-table { min-width: 600px; }
         th, td { padding: 12px; border-bottom: 1px solid var(--border-color); font-size: 14px; }
         th { color: var(--text-muted); font-weight: 500; }
         tr:last-child td { border-bottom: none; }
@@ -5396,7 +5397,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             }
             .header-right { width: 100%; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
             .dashboard-grid { grid-template-columns: 1fr; }
-            table { min-width: 500px; }
+            .wide-table { min-width: 500px; }
             th, td { padding: 8px; font-size: 13px; }
             .ring-container svg { width: 100px; height: 100px; }
             .ring-container svg circle { r: 40; cx: 50; cy: 50; }
@@ -5567,7 +5568,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="table-section">
         <div class="section-title">站点流量与性能统计</div>
         <div class="table-wrapper">
-            <table>
+            <table class="wide-table">
                 <thead>
                     <tr>
                         <th>站点</th>
@@ -5631,6 +5632,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
 
     <script>
+        // Global references to avoid temporal dead zone (TDZ) reference errors
+        let trendChart = null;
+
         // Theme toggler logic
         function toggleThemeDropdown(e) {
             e.stopPropagation();
@@ -5693,7 +5697,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         });
 
         const ctx = document.getElementById('trendChart').getContext('2d');
-        const trendChart = new Chart(ctx, {
+        trendChart = new Chart(ctx, {
             type: 'line',
             data: {
                 labels: [],
