@@ -5268,7 +5268,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Server-Mate Visual Console</title>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="chart.js"></script>
     <style>
         :root {
             --bg-color: #0b0e14;
@@ -5996,7 +5996,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                         <td>${s.requests} 次</td>
                         <td style="${s.errors > 0 ? 'color: var(--accent-red); font-weight: 600;' : ''}">${s.errors} 次</td>
                         <td>${formatBytes(s.bytes_out)}</td>
-                        <td>${s.avg_response_ms.toFixed(0)} ms</td>
+                        <td>${s.avg_response_ms !== null && s.avg_response_ms !== undefined ? s.avg_response_ms.toFixed(0) : '-'} ms</td>
                     </tr>
                 `).join('');
             }
@@ -6034,29 +6034,31 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
         async function fetchMetrics() {
             try {
-                if (useMockData) {
-                    renderMetrics(getMockData());
-                    return;
-                }
-                const res = await fetch('/api/metrics');
+                // 每次都优先尝试获取真实数据
+                const res = await fetch('api/metrics');
                 const data = await res.json();
                 
-                if (data.status === 'initializing') {
-                    document.getElementById('status-text').innerText = '系统初始化中...';
-                    useMockData = true;
-                    updateMockButtonUI();
-                    renderMetrics(getMockData());
+                if (data.status === 'ok') {
+                    // 真实数据可用，关闭演示模式
+                    if (useMockData) {
+                        useMockData = false;
+                        updateMockButtonUI();
+                    }
+                    document.getElementById('status-text').innerText = '';
+                    renderMetrics(data);
                     return;
                 }
-
-                renderMetrics(data);
             } catch (err) {
                 console.error('Error fetching SRE metrics:', err);
-                document.getElementById('status-text').innerText = '网络连接失败';
+            }
+
+            // 真实数据不可用（初始化中或网络失败），降级为演示数据
+            if (!useMockData) {
                 useMockData = true;
                 updateMockButtonUI();
-                renderMetrics(getMockData());
             }
+            document.getElementById('status-text').innerText = '系统初始化中...';
+            renderMetrics(getMockData());
         }
 
         // Loop fetching every 3s
@@ -6082,6 +6084,12 @@ class DashboardHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
             self.wfile.write(DASHBOARD_HTML.encode("utf-8"))
+        elif self.path == "/chart.js":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/javascript; charset=utf-8")
+            self.end_headers()
+            chart_path = Path(__file__).resolve().parents[1] / "assets" / "chart.umd.min.js"
+            self.wfile.write(chart_path.read_bytes())
         else:
             self.send_response(404)
             self.end_headers()
@@ -6154,6 +6162,13 @@ def run_daemon(
             }
             print(json.dumps(failure_payload, sort_keys=True), flush=True)
         time.sleep(interval_seconds)
+
+
+def resolve_mode(args: argparse.Namespace, config: dict) -> str:
+    """Determine run mode from args and config."""
+    if args.daemon:
+        return "daemon"
+    return "once"
 
 
 def main() -> int:
